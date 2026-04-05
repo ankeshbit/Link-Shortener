@@ -1,0 +1,37 @@
+import redis
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class MockRedis:
+    def __init__(self):
+        self.data = {}
+    
+    def get(self, key):
+        return self.data.get(key)
+        
+    def set(self, key, value, ex=None):
+        self.data[key] = value
+        
+    def incr(self, key):
+        if key not in self.data:
+            self.data[key] = 0
+        self.data[key] += 1
+        return self.data[key]
+
+    def expire(self, key, time):
+        pass # Mock does not support TTL
+
+def get_redis_client():
+    try:
+        client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        # Ping to check if Redis is alive
+        client.ping()
+        logger.info("Connected to Redis gracefully.")
+        return client
+    except redis.ConnectionError:
+        logger.warning("Redis is not available. Using MockRedis fallback for Caching/Rate Limiting.")
+        return MockRedis()
+
+redis_cache = get_redis_client()
