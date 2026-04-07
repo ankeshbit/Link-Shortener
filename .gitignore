@@ -1,0 +1,9 @@
+node_modules/
+venv/
+__pycache__/
+*.db
+*.db.bak
+.env
+.DS_Store
+dist/
+uvicorn_output.txt

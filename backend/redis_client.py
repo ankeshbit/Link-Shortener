@@ -25,13 +25,13 @@ class MockRedis:
 
 def get_redis_client():
     try:
-        client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        client = redis.Redis(host='127.0.0.1', port=6379, db=0, decode_responses=True, socket_connect_timeout=0.5, socket_timeout=0.5, retry_on_timeout=False)
         # Ping to check if Redis is alive
         client.ping()
         logger.info("Connected to Redis gracefully.")
         return client
-    except redis.ConnectionError:
-        logger.warning("Redis is not available. Using MockRedis fallback for Caching/Rate Limiting.")
+    except Exception as e:
+        logger.warning(f"Redis is not available ({e}). Using MockRedis fallback for Caching/Rate Limiting.")
         return MockRedis()
 
 redis_cache = get_redis_client()

@@ -7,10 +7,12 @@ class URL(Base):
     __tablename__ = "urls"
 
     id = Column(Integer, primary_key=True, index=True)
-    short_id = Column(String(10), unique=True, index=True, nullable=False)
+    short_id = Column(String(50), unique=True, index=True, nullable=False) # Increased length to 50 for custom aliases
     target_url = Column(String, nullable=False)
     clicks_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    password = Column(String, nullable=True)
 
     clicks = relationship("ClickEvent", back_populates="url", cascade="all, delete-orphan")
 
