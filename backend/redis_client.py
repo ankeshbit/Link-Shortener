@@ -1,5 +1,9 @@
-import redis
 import logging
+
+try:
+    import redis
+except ImportError:
+    redis = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +28,10 @@ class MockRedis:
         pass # Mock does not support TTL
 
 def get_redis_client():
+    if redis is None:
+        logger.warning("Redis package is not installed. Using MockRedis fallback for Caching/Rate Limiting.")
+        return MockRedis()
+
     try:
         client = redis.Redis(host='127.0.0.1', port=6379, db=0, decode_responses=True, socket_connect_timeout=0.5, socket_timeout=0.5, retry_on_timeout=False)
         # Ping to check if Redis is alive

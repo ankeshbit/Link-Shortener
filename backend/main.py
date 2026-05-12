@@ -1,6 +1,7 @@
-import shortuuid
+import secrets
 import requests
 import json
+import string
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks, Form
@@ -40,6 +41,11 @@ def rate_limit(request: Request):
     if current > 20: 
         raise HTTPException(status_code=429, detail="Too many requests")
     return True
+
+
+def generate_short_id(length: int = 7) -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 def track_click(short_id: str, db: Session, user_agent: str, ip: str):
     url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
@@ -87,7 +93,9 @@ def create_short_url(item: URLCreate, request: Request, db: Session = Depends(ge
             raise HTTPException(status_code=400, detail="Use any other name")
         short_id = item.custom_alias
     else:
-        short_id = shortuuid.ShortUUID().random(length=7)
+        short_id = generate_short_id()
+        while db.query(models.URL).filter(models.URL.short_id == short_id).first():
+            short_id = generate_short_id()
     
     new_url = models.URL(
         short_id=short_id, 
