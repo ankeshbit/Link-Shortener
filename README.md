@@ -10,9 +10,11 @@ ByteLink is a production-grade, full-stack URL Shortener application built with 
 - **WebSocket-Based Updates:** Stats update dynamically on the screen as clicks happen.
 - **Advanced Shortening Options:** Custom short path aliases, link expiration date timers, and sha256-encrypted password protection.
 - **QR Code Generator:** Scan short links instantly using built-in canvas graphics.
-- **Caching & Rate Limiting:** High-speed cached reads and client rate limits powered by Redis.
-- **Database Migrations:** SQL schema managed by Alembic, ensuring PostgreSQL is utilized everywhere.
-- **Fault-Tolerant Cache:** Resilient runtime wrapper allowing graceful fallback to local memory caching if Redis goes offline.
+- **Caching & Rate Limiting:** High-speed cached reads and client rate limits powered by Upstash/Redis.
+- **Dynamic CORS Wildcards:** Support for Vercel preview URLs out-of-the-box using regex-based origin validation.
+- **Robust Error Validation Formatting:** Prevents frontend crashes when the API returns list-based validation exceptions by converting them to human-readable strings.
+- **Obsolete Hashing Swaps:** Swapped the deprecated `passlib` wrapper for direct, high-performance `bcrypt` hashing.
+- **Professional API Landing:** An asynchronous root route (`/`) returning health and metadata instead of a 404.
 
 ---
 
@@ -23,7 +25,7 @@ ByteLink is a production-grade, full-stack URL Shortener application built with 
 *   **Caching & Limit Store:** Redis Cache (with SafeRedisClient fallback)
 *   **Containerization:** Docker & Docker Compose
 *   **Hosting Runtimes:** Railway / Render (Backend/DB/Redis), Vercel (Frontend SPA)
-*   **CI/CD:** GitHub Actions Pipelines (linting, tests, build checks, and Docker builds)
+*   **CI/CD:** Upgraded GitHub Actions Pipelines (linting, tests, build checks, and Docker builds)
 
 ---
 
@@ -31,17 +33,17 @@ ByteLink is a production-grade, full-stack URL Shortener application built with 
 ```text
 Link-Shortener/
 ├── .github/workflows/
-│   └── deploy.yml          # CI/CD workflow pipeline
+│   └── deploy.yml          # Modernized CI/CD workflow pipeline
 ├── backend/
 │   ├── alembic/            # Database schema migration versions
 │   ├── alembic.ini         # Alembic configuration
 │   ├── main.py             # FastAPI entrypoint, middlewares, routers & exceptions
 │   ├── database.py         # SQLAlchemy engine connection & Session dependency
 │   ├── models.py           # SQL DB Schema models (Postgres)
-│   ├── security.py         # JWT tokens & bcrypt password hashing
+│   ├── security.py         # JWT tokens & direct bcrypt password hashing
 │   ├── redis_client.py     # Resilient Redis engine wrapper
 │   ├── test_main.py        # PyTest automated unit tests
-│   ├── requirements.txt    # Python dependencies list
+│   ├── requirements.txt    # Modernized Python dependencies list
 │   ├── Dockerfile          # Optimized FastAPI Docker build config
 │   └── Procfile            # Deployment web process profile
 ├── frontend/
@@ -53,12 +55,13 @@ Link-Shortener/
 │   │   │   ├── ShortenerForm.jsx       # Shortener panel & live preview charts
 │   │   │   ├── AnalyticsDashboard.jsx  # Geographic graphs & WS listener
 │   │   │   ├── Dashboard.jsx           # User's links history manager
-│   │   │   ├── SignIn.jsx              # Auth credentials register/login card
-│   │   │   └── ... UI Decorators
+│   │   │   └── SignIn.jsx              # Auth credentials register/login card
 │   │   ├── App.jsx         # App router maps & Navigation
 │   │   └── index.css       # Custom HSL CSS variables & animations
 │   ├── vercel.json         # SPA router redirect rule
+│   ├── eslint.config.js    # ESLint flat configuration (JSX scoped ignores)
 │   └── package.json        # Frontend dependencies list
+├── pyproject.toml          # Root-level configuration for Python tools (Black, Isort)
 ├── docker-compose.yml      # Multi-container local workspace orchestrator
 ├── render.yaml             # Render infrastructure configuration
 └── README.md               # Professional documentation
@@ -73,8 +76,8 @@ Create a `.env` file in the `backend/` folder:
 ```env
 BASE_URL=http://localhost:8000
 DATABASE_URL=postgresql://postgres:postgrespassword@localhost:5432/bytelink
-REDIS_URL=redis://localhost:6379/0
-SECRET_KEY=super-secret-dev-key-for-bytelink-url-shortener-123456
+REDIS_URL=rediss://default:password@host:port # Use rediss:// for secure/Upstash connections
+SECRET_KEY=your-jwt-signing-secret-key
 ALGORITHM=HS256
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 FRONTEND_URL=http://localhost:5173
@@ -120,6 +123,32 @@ npm install
 npm run dev
 ```
 - Web dashboard client: `http://localhost:5173`
+
+---
+
+## CI/CD Pipeline & Code Quality Checks
+
+The project includes an automated GitHub Actions pipeline (`.github/workflows/deploy.yml`) which runs on every push and pull request to the `main` branch.
+
+### Upgraded CI Configuration
+*   **Checkout & Setups:** Uses modern `actions/checkout@v4`, `actions/setup-python@v5`, and `actions/setup-node@v4`.
+*   **Node.js Runtime:** Upgraded to Node.js **22** (resolving deprecation warnings).
+*   **Python Runtime:** Configured to run on Python **3.11** for stable module compatibility.
+
+### Local Quality Commands
+Before pushing code, verify that formatting, sorting, and linting checks pass:
+
+```bash
+# Python Formatting & Lints
+black --check backend/
+isort --check-only backend/
+ruff check backend/
+
+# Frontend Lints & Compilation
+cd frontend
+npm run lint
+npm run build
+```
 
 ---
 
