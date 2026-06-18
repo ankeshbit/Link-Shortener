@@ -54,6 +54,19 @@ def test_health_check():
         assert response.json()["status"] == "healthy"
 
 
+def test_root_endpoint():
+    """Asserts that root landing endpoint returns status 200 and success details."""
+    response = client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "ByteLink API is running successfully"
+    assert data["status"] == "healthy"
+    assert data["docs"] == "/docs"
+    assert data["redoc"] == "/redoc"
+    assert data["health"] == "/health"
+    assert data["version"] == "1.0.0"
+
+
 def test_invalid_short_url_404():
     """Asserts that non-existent short URL returns 404 error."""
     response = client.get("/nonexistent-short-id-12345")

@@ -221,6 +221,28 @@ def health_check(db: Session = Depends(get_db)):
     return {"status": "healthy", "redis": "connected" if redis_ok else "degraded"}
 
 
+# API Root Landing Schema & Route
+class RootResponse(BaseModel):
+    message: str
+    status: str
+    docs: str
+    redoc: str
+    health: str
+    version: str
+
+
+@app.get("/", response_model=RootResponse, status_code=status.HTTP_200_OK)
+async def root():
+    return {
+        "message": "ByteLink API is running successfully",
+        "status": "healthy",
+        "docs": "/docs",
+        "redoc": "/redoc",
+        "health": "/health",
+        "version": "1.0.0",
+    }
+
+
 # Connection manager for real-time WebSocket analytics
 class ConnectionManager:
     def __init__(self):
