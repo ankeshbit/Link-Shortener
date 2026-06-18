@@ -188,13 +188,15 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 # Configure CORS Origins
-frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-# Support multi-origin comma-separated values, and always allow localhost in dev
-origins = [origin.strip() for origin in frontend_url.split(",") if origin.strip()]
-if "http://localhost:5173" not in origins:
-    origins.append("http://localhost:5173")
-if "http://127.0.0.1:5173" not in origins:
-    origins.append("http://127.0.0.1:5173")
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+
+# Build the list of allowed origins
+origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+if FRONTEND_URL:
+    for url in FRONTEND_URL.split(","):
+        trimmed = url.strip()
+        if trimmed and trimmed not in origins:
+            origins.append(trimmed)
 
 app.add_middleware(
     CORSMiddleware,

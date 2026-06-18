@@ -25,7 +25,7 @@ services:
       - key: ENV
         value: production
       - key: FRONTEND_URL
-        value: https://bytelink-frontend.vercel.app  # Replace with actual Vercel frontend URL after deployment
+        value: ""  # Configure with your actual Vercel frontend URL after deployment
       - key: BASE_URL
         sync: false  # Auto-loaded by Render URL in production or configure manually
 
