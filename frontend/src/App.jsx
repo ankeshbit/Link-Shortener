@@ -1,13 +1,21 @@
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useEffect } from 'react';
 import ShortenerForm from './components/ShortenerForm';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
 import SignIn from './components/SignIn';
+import Dashboard from './components/Dashboard';
 import { MagnetLines } from './components/MagnetLines';
 
 function AppContent() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [activeSection, setActiveSection] = useState('');
+  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
+
+  // Sync authentication state on path navigation
+  useEffect(() => {
+    setIsAuthenticated(!!localStorage.getItem('token'));
+  }, [location.pathname]);
 
   // Smooth scroll and focus logic for active section underlines via IntersectionObserver
   useEffect(() => {
@@ -65,7 +73,7 @@ function AppContent() {
   const handleNavClick = (e, id) => {
     e.preventDefault();
     if (location.pathname !== '/') {
-      window.location.href = `/#${id}`;
+      navigate(`/#${id}`);
       return;
     }
     const el = document.getElementById(id);
@@ -77,7 +85,7 @@ function AppContent() {
   const handleGetStartedClick = (e) => {
     e.preventDefault();
     if (location.pathname !== '/') {
-      window.location.href = '/#hero-input';
+      navigate('/#hero-input');
       return;
     }
     const container = document.querySelector('.input-container-outer');
@@ -96,6 +104,13 @@ function AppContent() {
     }
   };
 
+  const handleSignOut = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
+    setIsAuthenticated(false);
+    navigate('/login');
+  };
+
   return (
     <div className="app-container">
       {/* Interactive Magnet Lines background grid */}
@@ -111,7 +126,7 @@ function AppContent() {
       </div>
 
       <nav className="navbar">
-        <Link to="/" className="logo-container" aria-label="ByteLink Home">
+        <Link to={isAuthenticated ? "/dashboard" : "/"} className="logo-container" aria-label="ByteLink Home">
           <div className="logo-icon">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
@@ -133,7 +148,20 @@ function AppContent() {
           >
             GitHub
           </a>
-          <Link to="/login" className="nav-link">Sign In</Link>
+          {isAuthenticated ? (
+            <>
+              <Link to="/dashboard" className="nav-link">Dashboard</Link>
+              <button 
+                onClick={handleSignOut} 
+                className="nav-link" 
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit' }}
+              >
+                Sign Out
+              </button>
+            </>
+          ) : (
+            <Link to="/login" className="nav-link">Sign In</Link>
+          )}
           <a href="#hero-input" onClick={handleGetStartedClick} className="btn-nav-primary">Get Started</a>
         </div>
       </nav>
@@ -142,6 +170,7 @@ function AppContent() {
         <Route path="/" element={<ShortenerForm />} />
         <Route path="/stats/:id" element={<AnalyticsDashboard />} />
         <Route path="/login" element={<SignIn />} />
+        <Route path="/dashboard" element={<Dashboard />} />
       </Routes>
 
       <footer className="footer">

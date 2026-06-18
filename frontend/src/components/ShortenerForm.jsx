@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import axios from 'axios';
+import api from '../api/axios';
 import { 
   Copy, Check, BarChart2, Settings, Download, ExternalLink, QrCode, Lock, 
   ChevronRight, TrendingUp, Laptop, Globe 
@@ -66,13 +66,18 @@ const ShortenerForm = () => {
     setLoading(true);
     setError('');
     
+    let formattedUrl = url.trim();
+    if (!/^https?:\/\//i.test(formattedUrl)) {
+      formattedUrl = `https://${formattedUrl}`;
+    }
+    
     try {
-      const payload = { target_url: url };
+      const payload = { target_url: formattedUrl };
       if (customAlias) payload.custom_alias = customAlias;
       if (expiresAt) payload.expires_at = new Date(expiresAt).toISOString();
       if (password) payload.password = password;
 
-      const res = await axios.post('http://localhost:8000/api/shorten', payload);
+      const res = await api.post('/api/shorten', payload);
       setResult(res.data);
       setCopied(false);
       setCustomAlias('');
@@ -275,6 +280,7 @@ const ShortenerForm = () => {
                       placeholder="e.g. my-portfolio" 
                       value={customAlias} 
                       onChange={(e) => setCustomAlias(e.target.value)} 
+                      autoComplete="off"
                     />
                   </div>
                   <div className="advanced-field">
@@ -296,6 +302,7 @@ const ShortenerForm = () => {
                       placeholder="Secret key" 
                       value={password} 
                       onChange={(e) => setPassword(e.target.value)} 
+                      autoComplete="new-password"
                     />
                   </div>
                 </div>

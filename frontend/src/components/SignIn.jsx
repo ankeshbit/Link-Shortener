@@ -1,21 +1,75 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Mail, Lock, ArrowLeft } from 'lucide-react';
+import { Mail, Lock, ArrowLeft, Loader2 } from 'lucide-react';
+import api from '../api/axios';
 
 const SignIn = () => {
+  const [isRegister, setIsRegister] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const navigate = useNavigate();
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    // Temporary mock authentication success
-    alert('Logged in successfully (Mock)!');
-    navigate('/');
+    if (!email || !password) return;
+    setLoading(true);
+    setError('');
+
+    const endpoint = isRegister ? '/api/auth/register' : '/api/auth/login';
+
+    try {
+      const res = await api.post(endpoint, { email, password });
+      const { access_token, refresh_token } = res.data;
+      
+      localStorage.setItem('token', access_token);
+      if (refresh_token) {
+        localStorage.setItem('refreshToken', refresh_token);
+      }
+      navigate('/dashboard');
+    } catch (err) {
+      if (err.response?.data?.detail) {
+        setError(err.response.data.detail);
+      } else {
+        setError(`Failed to ${isRegister ? 'register' : 'sign in'}. Please verify your network connections.`);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    setError('');
+    
+    // Simulate Google Login popup / response redirect.
+    // In production this would be Google Identity services, but here we invoke our backend's
+    // google auth endpoint using a client-side mock callback to generate a signed backend JWT.
+    try {
+      // Mock OAuth credentials returned from Google
+      const mockGoogleProfile = {
+        email: email || 'google-user@bytelink.co',
+        google_id: `g_oauth_${Math.floor(Math.random() * 100000000)}`
+      };
+
+      const res = await api.post('/api/auth/google', mockGoogleProfile);
+      const { access_token, refresh_token } = res.data;
+
+      localStorage.setItem('token', access_token);
+      if (refresh_token) {
+        localStorage.setItem('refreshToken', refresh_token);
+      }
+      navigate('/dashboard');
+    } catch (err) {
+      setError('Google Sign In authentication failed.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="login-container">
+    <div className="login-container" style={{ animation: 'fadeIn 0.5s ease-out' }}>
       <div className="login-card">
         <button 
           onClick={() => navigate('/')} 
@@ -27,11 +81,19 @@ const SignIn = () => {
         </button>
 
         <div>
-          <h2 className="login-title">Welcome back</h2>
+          <h2 className="login-title">{isRegister ? 'Create an account' : 'Welcome back'}</h2>
           <p style={{ color: 'var(--text-secondary)', textAlign: 'center', fontSize: '14px', marginTop: '4px' }}>
-            Enter your credentials to access your dashboard
+            {isRegister 
+              ? 'Register credentials below to save and track short links' 
+              : 'Enter your credentials to access your dashboard'}
           </p>
         </div>
+
+        {error && (
+          <div className="error-toast-new" role="alert" style={{ width: '100%' }}>
+            <span>{error}</span>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="login-form">
           <div className="advanced-field">
@@ -74,19 +136,37 @@ const SignIn = () => {
             </div>
           </div>
 
-          <button type="submit" className="btn-login-primary">
-            Sign In
+          <button type="submit" className="btn-login-primary" disabled={loading}>
+            {loading ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                <Loader2 size={16} className="spinner" />
+                <span>Processing...</span>
+              </div>
+            ) : (
+              isRegister ? 'Sign Up' : 'Sign In'
+            )}
           </button>
         </form>
+
+        <div style={{ textAlign: 'center', marginTop: '1rem', fontSize: '14px' }}>
+          <button 
+            type="button" 
+            onClick={() => {
+              setIsRegister(!isRegister);
+              setError('');
+            }}
+            style={{ background: 'transparent', border: 'none', color: 'var(--accent-secondary)', cursor: 'pointer', fontWeight: '500' }}
+          >
+            {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}
+          </button>
+        </div>
 
         <div className="divider-row">or</div>
 
         <button 
-          onClick={() => {
-            alert('Continue with Google (Mock)');
-            navigate('/');
-          }} 
+          onClick={handleGoogleSignIn} 
           className="btn-login-google"
+          disabled={loading}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
             <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>

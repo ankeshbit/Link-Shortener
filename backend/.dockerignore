@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+.venv/
+sqlite.db
+backend.log
+node_modules/
+package-lock.json
+package.json

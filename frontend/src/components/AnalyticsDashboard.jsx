@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import axios from 'axios';
+import api from '../api/axios';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { ArrowLeft, MapPin, Clock } from 'lucide-react';
@@ -13,20 +13,93 @@ const AnalyticsDashboard = () => {
   const { id } = useParams();
   const [stats, setStats] = useState(null);
   const [error, setError] = useState('');
+  const [isLive, setIsLive] = useState(false);
 
   useEffect(() => {
+    let ws = null;
+    let fallbackInterval = null;
+    let isMounted = true;
+
     const fetchStats = async () => {
       try {
-        const res = await axios.get(`http://localhost:8000/api/stats/${id}`);
-        setStats(res.data);
+        const res = await api.get(`/api/stats/${id}`);
+        if (isMounted) {
+          setStats(res.data);
+        }
       } catch (err) {
-        setError("Error fetching stats. This URL may not exist.");
+        if (isMounted) {
+          setError("Error fetching stats. This URL may not exist.");
+        }
       }
     };
-    fetchStats();
-    
-    const interval = setInterval(fetchStats, 5000);
-    return () => clearInterval(interval);
+
+    const connectWS = () => {
+      if (!isMounted) return;
+
+      const apiURL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      // Convert http:// to ws:// and https:// to wss://
+      const wsURL = apiURL.replace(/^http/, 'ws') + `/api/ws/stats/${id}`;
+
+      try {
+        ws = new WebSocket(wsURL);
+
+        ws.onopen = () => {
+          if (isMounted) {
+            setIsLive(true);
+            if (fallbackInterval) {
+              clearInterval(fallbackInterval);
+              fallbackInterval = null;
+            }
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            if (isMounted && (message.type === 'initial_stats' || message.type === 'click_update')) {
+              setStats(message.data);
+            }
+          } catch (e) {
+            console.error("Failed to parse websocket message", e);
+          }
+        };
+
+        ws.onerror = () => {
+          if (ws) ws.close();
+        };
+
+        ws.onclose = () => {
+          if (!isMounted) return;
+          setIsLive(false);
+          
+          // Re-establish HTTP polling fallback
+          if (!fallbackInterval) {
+            fetchStats();
+            fallbackInterval = setInterval(fetchStats, 5000);
+          }
+          
+          // Retry connection in 5 seconds
+          setTimeout(connectWS, 5000);
+        };
+      } catch (e) {
+        console.error("Websocket initialization error", e);
+        if (isMounted) {
+          setIsLive(false);
+          if (!fallbackInterval) {
+            fetchStats();
+            fallbackInterval = setInterval(fetchStats, 5000);
+          }
+        }
+      }
+    };
+
+    connectWS();
+
+    return () => {
+      isMounted = false;
+      if (ws) ws.close();
+      if (fallbackInterval) clearInterval(fallbackInterval);
+    };
   }, [id]);
 
   if (error) return (
@@ -112,9 +185,21 @@ const AnalyticsDashboard = () => {
   return (
     <div style={{ animation: 'fadeIn 0.5s ease-out' }}>
       <div className="stats-page-header">
-        <Link to="/" className="btn-back" aria-label="Back to link shortener form page">
-          <ArrowLeft size={16} aria-hidden="true" /> Back to Shortener
-        </Link>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', marginBottom: '1rem' }}>
+          <Link to={localStorage.getItem('token') ? "/dashboard" : "/"} className="btn-back" aria-label="Back to dashboard or home page">
+            <ArrowLeft size={16} aria-hidden="true" /> Back
+          </Link>
+          {isLive ? (
+            <span className="badge-live" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+              <span className="spinner" style={{ width: '8px', height: '8px', border: 'none', background: 'var(--accent)', animation: 'pulse-glow 1s infinite alternate' }}></span>
+              Live Connection
+            </span>
+          ) : (
+            <span className="badge-live" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', background: 'rgba(245, 158, 11, 0.15)', color: '#F59E0B' }}>
+              Polling Connection
+            </span>
+          )}
+        </div>
         <h1 className="stats-title">Analytics Dashboard</h1>
         <p className="stats-target">
           Tracking links for: <a href={stats.target_url} target="_blank" rel="noopener noreferrer">{stats.target_url}</a>
