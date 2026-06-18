@@ -88,7 +88,14 @@ const ShortenerForm = () => {
       if (err.response?.status === 429) {
         setError("Too many requests! Rate limit exceeded.");
       } else if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
+        const detail = err.response.data.detail;
+        if (typeof detail === 'string') {
+          setError(detail);
+        } else if (Array.isArray(detail)) {
+          setError(detail.map(d => d.msg || d).join(', '));
+        } else {
+          setError(JSON.stringify(detail));
+        }
       } else {
         setError("Failed to shorten URL. Make sure it's valid.");
       }

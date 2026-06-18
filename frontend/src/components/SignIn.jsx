@@ -30,7 +30,14 @@ const SignIn = () => {
       navigate('/dashboard');
     } catch (err) {
       if (err.response?.data?.detail) {
-        setError(err.response.data.detail);
+        const detail = err.response.data.detail;
+        if (typeof detail === 'string') {
+          setError(detail);
+        } else if (Array.isArray(detail)) {
+          setError(detail.map(d => d.msg || d).join(', '));
+        } else {
+          setError(JSON.stringify(detail));
+        }
       } else {
         setError(`Failed to ${isRegister ? 'register' : 'sign in'}. Please verify your network connections.`);
       }
