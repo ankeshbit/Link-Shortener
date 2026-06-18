@@ -26,7 +26,7 @@ const AnalyticsDashboard = () => {
         if (isMounted) {
           setStats(res.data);
         }
-      } catch (err) {
+      } catch {
         if (isMounted) {
           setError("Error fetching stats. This URL may not exist.");
         }

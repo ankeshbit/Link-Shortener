@@ -11,11 +11,21 @@ from typing import Optional
 import httpx
 import models
 import security
+
 # Local imports
 from database import SessionLocal, engine, get_db
 from dotenv import load_dotenv
-from fastapi import (BackgroundTasks, Depends, FastAPI, Form, HTTPException,
-                     Request, WebSocket, WebSocketDisconnect, status)
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Form,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse

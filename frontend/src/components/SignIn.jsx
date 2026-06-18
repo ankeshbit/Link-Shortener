@@ -61,7 +61,7 @@ const SignIn = () => {
         localStorage.setItem('refreshToken', refresh_token);
       }
       navigate('/dashboard');
-    } catch (err) {
+    } catch {
       setError('Google Sign In authentication failed.');
     } finally {
       setLoading(false);

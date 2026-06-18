@@ -14,23 +14,23 @@ const Dashboard = () => {
   const [copiedId, setCopiedId] = useState(null);
   const navigate = useNavigate();
 
-  const fetchUserLinks = async () => {
-    try {
-      const res = await api.get('/api/user/links');
-      setLinks(res.data);
-    } catch (err) {
-      if (err.response?.status === 401) {
-        localStorage.removeItem('token');
-        navigate('/login');
-      } else {
-        setError('Failed to load your shortened URLs. Please try again.');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
+    const fetchUserLinks = async () => {
+      try {
+        const res = await api.get('/api/user/links');
+        setLinks(res.data);
+      } catch (err) {
+        if (err.response?.status === 401) {
+          localStorage.removeItem('token');
+          navigate('/login');
+        } else {
+          setError('Failed to load your shortened URLs. Please try again.');
+        }
+      } finally {
+        setLoading(false);
+      }
+    };
+
     const token = localStorage.getItem('token');
     if (!token) {
       navigate('/login');
@@ -43,8 +43,8 @@ const Dashboard = () => {
     if (!window.confirm('Are you sure you want to delete this short URL?')) return;
     try {
       await api.delete(`/api/user/links/${shortId}`);
-      setLinks(links.filter(link => link.short_id !== shortId));
-    } catch (err) {
+      setLinks(links.filter((link) => link.short_id !== shortId));
+    } catch {
       alert('Failed to delete the link. Please try again.');
     }
   };
