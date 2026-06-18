@@ -3,7 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import { Line } from 'react-chartjs-2';
-import { ArrowLeft, MapPin, MousePointerClick, Clock } from 'lucide-react';
+import { ArrowLeft, MapPin, Clock } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 // Register Filler for gradient under line chart
@@ -30,13 +30,20 @@ const AnalyticsDashboard = () => {
   }, [id]);
 
   if (error) return (
-    <div className="glass-card" style={{ textAlign: 'center', marginTop: '4rem' }}>
-      <h2 style={{ marginBottom: '1rem' }}>{error}</h2>
-      <Link to="/" className="btn-primary" style={{ display: 'inline-flex' }}>Go Back</Link>
+    <div className="stats-card-main" style={{ textAlign: 'center', marginTop: '4rem', padding: '48px' }}>
+      <h2 style={{ marginBottom: '1.5rem', fontWeight: '700' }}>{error}</h2>
+      <Link to="/" className="btn-action primary-action" style={{ display: 'inline-flex', width: 'fit-content', margin: '0 auto' }} role="button">
+        Go Back
+      </Link>
     </div>
   );
   
-  if (!stats) return <div style={{ textAlign: 'center', marginTop: '6rem' }}><h2>Loading real-time analytics...</h2></div>;
+  if (!stats) return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', marginTop: '8rem', gap: '16px' }}>
+      <span className="spinner" style={{ width: '28px', height: '28px', borderWidth: '3px' }}></span>
+      <h2>Loading real-time analytics...</h2>
+    </div>
+  );
 
   const countryLabels = Object.keys(stats.countries);
   const countryData = Object.values(stats.countries);
@@ -47,14 +54,23 @@ const AnalyticsDashboard = () => {
       {
         label: 'Clicks by Country',
         data: countryData.length > 0 ? countryData : [0],
-        borderColor: '#55C1BF',
-        backgroundColor: 'rgba(85, 193, 191, 0.2)', // Light teal gradient for charts
+        borderColor: '#3ECF8E',
+        backgroundColor: (context) => {
+          const chart = context.chart;
+          const {ctx, chartArea} = chart;
+          if (!chartArea) return 'rgba(62, 207, 142, 0.15)';
+          const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          gradient.addColorStop(0, 'rgba(62, 207, 142, 0.15)');
+          gradient.addColorStop(1, 'rgba(62, 207, 142, 0)');
+          return gradient;
+        },
         fill: true,
         tension: 0.4,
-        pointBackgroundColor: '#8b5cf6', // Soft purple dots
-        pointBorderColor: '#fff',
+        cubicInterpolationMode: 'monotone', // smooth monotone interpolation
+        pointBackgroundColor: '#7DD3FC', // Light blue dots
+        pointBorderColor: '#070B14',
         pointHoverBackgroundColor: '#fff',
-        pointHoverBorderColor: '#8b5cf6',
+        pointHoverBorderColor: '#7DD3FC',
       },
     ],
   };
@@ -62,70 +78,83 @@ const AnalyticsDashboard = () => {
   const chartOptions = {
     responsive: true,
     maintainAspectRatio: false,
-    color: '#94A3B8',
+    color: '#9CA3AF',
+    layout: {
+      padding: {
+        left: 16,
+        right: 32, // Last point remains 32px away from right border
+        top: 16,
+        bottom: 24 // Leave bottom padding
+      }
+    },
+    animation: {
+      duration: 1500, // Animate line drawing over 1.5s
+      easing: 'easeInOutQuart'
+    },
     plugins: {
-      legend: { position: 'top', labels: { color: '#94A3B8', font: { family: 'Inter' } } },
+      legend: { position: 'top', labels: { color: '#9CA3AF', font: { family: 'Geist' } } },
       tooltip: {
-        backgroundColor: 'rgba(2, 4, 10, 0.8)',
+        backgroundColor: '#0D1321',
         titleColor: '#fff',
-        bodyColor: '#55C1BF',
-        borderColor: 'rgba(255,255,255,0.1)',
+        bodyColor: '#3ECF8E',
+        borderColor: 'rgba(255,255,255,0.08)',
         borderWidth: 1,
         padding: 12,
         boxPadding: 4,
       }
     },
     scales: {
-      y: { ticks: { color: '#64748b', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.05)' } },
-      x: { ticks: { color: '#64748b' }, grid: { color: 'rgba(255,255,255,0.05)' } }
+      y: { ticks: { color: '#6B7280', stepSize: 1 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+      x: { ticks: { color: '#6B7280' }, grid: { color: 'rgba(255,255,255,0.04)' } }
     }
   };
 
   return (
     <div style={{ animation: 'fadeIn 0.5s ease-out' }}>
-      <div style={{ marginBottom: '3rem' }}>
-        <Link to="/" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', textDecoration: 'none', marginBottom: '1.5rem', transition: 'color 0.2s', fontWeight: '500' }}>
-          <ArrowLeft size={18} /> Back to Shortener
+      <div className="stats-page-header">
+        <Link to="/" className="btn-back" aria-label="Back to link shortener form page">
+          <ArrowLeft size={16} aria-hidden="true" /> Back to Shortener
         </Link>
-        <h1 style={{ fontSize: '3rem', marginBottom: '0.8rem', letterSpacing: '-1px' }}>Analytics Dashboard</h1>
-        <p style={{ color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.1rem' }}>
-          Tracking links for: <a href={stats.target_url} style={{ color: 'var(--accent-primary)', textDecoration: 'none' }}>{stats.target_url}</a>
+        <h1 className="stats-title">Analytics Dashboard</h1>
+        <p className="stats-target">
+          Tracking links for: <a href={stats.target_url} target="_blank" rel="noopener noreferrer">{stats.target_url}</a>
         </p>
       </div>
 
-      <div className="dashboard-grid">
-        <div className="glass-card stat-card">
-          <MousePointerClick size={40} color="var(--accent-primary)" style={{ marginBottom: '1.5rem', opacity: '0.8' }} />
-          <h3 className="stat-card-title">Total Clicks</h3>
-          <div className="stat-number">{stats.total_clicks}</div>
+      <div className="stats-grid-main">
+        <div className="stats-card-main">
+          <div className="stats-card-main-title">Total Clicks</div>
+          <div className="stats-card-main-number">{stats.total_clicks}</div>
         </div>
 
-        <div className="glass-card stat-card" style={{ flex: 2, padding: '1.5rem 2rem' }}>
-          <h3 className="stat-card-title" style={{ marginBottom: '1rem' }}>Geographic Distribution</h3>
+        <div className="stats-chart-card">
+          <h3 className="stats-chart-title">Geographic Distribution</h3>
           <div className="chart-container">
             <Line data={chartData} options={chartOptions} />
           </div>
         </div>
       </div>
 
-      <div className="glass-card" style={{ marginTop: '2.5rem' }}>
-        <h3 style={{ borderBottom: '1px solid var(--border-light)', paddingBottom: '1.25rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.6rem', color: 'var(--text-primary)' }}>
-          <Clock size={20} color="var(--accent-primary)" /> Recent Clicks Log
+      <div className="stats-log-card">
+        <h3 className="stats-log-title">
+          <Clock size={20} color="var(--accent)" aria-hidden="true" /> Recent Clicks Log
         </h3>
         {stats.recent_clicks.length === 0 ? (
-          <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', padding: '1rem 0' }}>No clicks yet. Share your short link to gather data!</p>
+          <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', padding: '1rem 0' }}>
+            No clicks yet. Share your short link to gather data!
+          </p>
         ) : (
-          <ul className="recent-clicks">
+          <ul className="stats-log-list">
             {stats.recent_clicks.slice().reverse().map((click, i) => (
-              <li key={i}>
-                <div>
-                  <span className="click-ip">{click.ip || 'Hidden IP'}</span>
-                  <span className="click-location">
-                    <MapPin size={14} style={{ color: 'var(--accent-secondary)' }}/> 
+              <li key={i} className="stats-log-item">
+                <div className="log-item-details">
+                  <span className="log-item-ip">{click.ip || 'Hidden IP'}</span>
+                  <span className="log-item-geo">
+                    <MapPin size={12} style={{ color: 'var(--accent-secondary)', marginRight: '4px' }} aria-hidden="true" /> 
                     {click.city ? `${click.city}, ${click.country}` : 'Unknown Location'}
                   </span>
                 </div>
-                <div className="click-time">
+                <div className="log-item-time">
                   {click.time ? formatDistanceToNow(new Date(click.time), { addSuffix: true }) : 'Just now'}
                 </div>
               </li>

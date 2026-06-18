@@ -1,8 +1,51 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Copy, Check, BarChart2, Settings, Download } from 'lucide-react';
+import { 
+  Copy, Check, BarChart2, Settings, Download, ExternalLink, QrCode, Lock, 
+  ChevronRight, TrendingUp, Laptop, Globe 
+} from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip } from 'chart.js';
+import { Line } from 'react-chartjs-2';
+import { TextRepel } from './TextRepel';
+
+// Register ChartJS modules
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip);
+
+// Animated Counter Component using requestAnimationFrame for smooth 1s ease-out counting
+const AnimatedCounter = ({ value, suffix = "", isFloat = false }) => {
+  const [displayVal, setDisplayVal] = useState(0);
+
+  useEffect(() => {
+    const numericTarget = parseFloat(value.toString().replace(/,/g, ''));
+    if (isNaN(numericTarget)) return;
+
+    const duration = 1000; // 1 second
+    const startTime = performance.now();
+
+    const run = (now) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(elapsed / duration, 1);
+      // easeOutQuad curve
+      const ease = progress * (2 - progress);
+      const current = ease * numericTarget;
+
+      setDisplayVal(current);
+
+      if (progress < 1) {
+        requestAnimationFrame(run);
+      }
+    };
+
+    requestAnimationFrame(run);
+  }, [value]);
+
+  if (isFloat) {
+    return <span>{displayVal.toFixed(1)}{suffix}</span>;
+  }
+  return <span>{Math.floor(displayVal).toLocaleString()}{suffix}</span>;
+};
 
 const ShortenerForm = () => {
   const [url, setUrl] = useState('');
@@ -12,6 +55,7 @@ const ShortenerForm = () => {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [toastShow, setToastShow] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const qrRef = useRef();
@@ -65,98 +109,457 @@ const ShortenerForm = () => {
     if (result) {
       navigator.clipboard.writeText(result.short_url);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setToastShow(true);
+      
+      setTimeout(() => {
+        setToastShow(false);
+        setTimeout(() => setCopied(false), 200);
+      }, 2000);
+    }
+  };
+
+  // Chart data and options for mock analytics preview
+  const previewChartData = {
+    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    datasets: [
+      {
+        data: [140, 220, 190, 340, 290, 480, 520],
+        borderColor: '#3ECF8E',
+        backgroundColor: (context) => {
+          const chart = context.chart;
+          const {ctx, chartArea} = chart;
+          if (!chartArea) return 'rgba(62, 207, 142, 0.08)';
+          const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          gradient.addColorStop(0, 'rgba(62, 207, 142, 0.08)');
+          gradient.addColorStop(1, 'rgba(62, 207, 142, 0)');
+          return gradient;
+        },
+        fill: true,
+        tension: 0.4,
+        cubicInterpolationMode: 'monotone',
+        pointRadius: 0,
+        borderWidth: 3, // stroke width 3px
+      }
+    ]
+  };
+
+  const previewChartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { 
+      legend: { display: false }, // no legends
+      tooltip: { 
+        enabled: true, // tooltips enabled on hover
+        backgroundColor: '#0D1321',
+        titleColor: '#fff',
+        bodyColor: '#3ECF8E',
+        borderColor: 'rgba(255,255,255,0.08)',
+        borderWidth: 1,
+        padding: 10,
+        displayColors: false
+      }
+    },
+    animation: {
+      duration: 1500, // duration 1.5s
+      easing: 'easeInOutQuart'
+    },
+    layout: {
+      padding: {
+        left: 24,
+        right: 32, // 32px from right edge
+        top: 16,
+        bottom: 24 // 24px from bottom
+      }
+    },
+    scales: {
+      x: { 
+        display: true, // Show Mon, Tue, etc.
+        ticks: {
+          color: '#6B7280',
+          font: { family: 'Geist', size: 11 }
+        },
+        grid: { display: false }, // Hide heavy grid lines
+        border: { color: 'rgba(255, 255, 255, 0.08)' } // subtle baseline axis line
+      },
+      y: { 
+        display: false,
+        min: 100, // Limit bottom height to occupy 80% of card height
+        max: 600
+      }
     }
   };
 
   return (
-    <div className="hero">
-      <h1>Shorten Your Links.<br/>Expand Your <span className="accent-text">Reach.</span></h1>
-      <p>
-        A scalable, lightning-fast URL shortener with real-time analytics. 
-        Paste your long URL below to get started.
-      </p>
+    <div>
+      {/* Hero Section (Asymmetrical Split Grid Layout) */}
+      <section className="hero-grid" id="hero">
+        {/* Left Column: Input Form & Setup */}
+        <div className="hero-left">
+          <h1 className="hero-title">
+            <TextRepel text="Beautiful links with analytics built in." />
+          </h1>
+          <p className="hero-desc">
+            Shorten URLs, generate QR codes, and track clicks with real-time insights—all from one simple dashboard.
+          </p>
 
-      <div className="glass-card" style={{ marginTop: '3.5rem', textAlign: 'left' }}>
-        <form onSubmit={handleSubmit}>
-          <div className="input-group">
-            <input 
-              type="url" 
-              className="url-input" 
-              placeholder="https://your-long-url.com/very/long/path" 
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              required
-            />
-            <button type="submit" className="btn-primary" disabled={loading}>
-              {loading ? 'Shortening...' : 'Generate Link'}
+          <form onSubmit={handleSubmit}>
+            <div className="input-container-outer">
+              <input 
+                id="hero-input"
+                type="url" 
+                className="url-input-new" 
+                placeholder="https://your-long-url.com/very/long/path" 
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                required
+                aria-label="Long URL to shorten"
+              />
+              <button 
+                type="submit" 
+                className="btn-generate" 
+                disabled={loading}
+                aria-label={loading ? "Generating short link" : "Generate short link"}
+              >
+                {loading ? (
+                  <>
+                    <span className="spinner" aria-hidden="true"></span>
+                    <span>Generating...</span>
+                  </>
+                ) : (
+                  'Generate Link'
+                )}
+              </button>
+            </div>
+          </form>
+
+          {error && (
+            <div className="error-toast-new" role="alert">
+              <span>{error}</span>
+              <button 
+                type="button" 
+                className="error-close-new" 
+                onClick={() => setError('')}
+                aria-label="Close error message"
+              >
+                &times;
+              </button>
+            </div>
+          )}
+
+          {/* Advanced Options Accordion */}
+          <div className="accordion-wrapper">
+            <button 
+              type="button" 
+              className="accordion-trigger" 
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              aria-expanded={showAdvanced}
+              aria-controls="advanced-panel"
+            >
+              <ChevronRight className={`accordion-icon ${showAdvanced ? 'open' : ''}`} size={16} aria-hidden="true" />
+              <span>Advanced Options</span>
             </button>
+            
+            <div 
+              id="advanced-panel"
+              className={`accordion-body-grid ${showAdvanced ? 'open' : ''}`}
+              role="region"
+            >
+              <div className="accordion-body-content">
+                <div className="advanced-options-grid">
+                  <div className="advanced-field">
+                    <label htmlFor="custom-alias">Custom Alias (Optional)</label>
+                    <input 
+                      id="custom-alias"
+                      type="text" 
+                      className="advanced-input" 
+                      placeholder="e.g. my-portfolio" 
+                      value={customAlias} 
+                      onChange={(e) => setCustomAlias(e.target.value)} 
+                    />
+                  </div>
+                  <div className="advanced-field">
+                    <label htmlFor="expiry-date">Expiration Date (Optional)</label>
+                    <input 
+                      id="expiry-date"
+                      type="datetime-local" 
+                      className="advanced-input" 
+                      value={expiresAt} 
+                      onChange={(e) => setExpiresAt(e.target.value)} 
+                    />
+                  </div>
+                  <div className="advanced-field">
+                    <label htmlFor="password-opt">Password Protection (Optional)</label>
+                    <input 
+                      id="password-opt"
+                      type="password" 
+                      className="advanced-input" 
+                      placeholder="Secret key" 
+                      value={password} 
+                      onChange={(e) => setPassword(e.target.value)} 
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-          
-          <button type="button" className="advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
-            <Settings size={16} /> {showAdvanced ? 'Hide Advanced Options' : 'Show Advanced Options'}
-          </button>
 
-          {showAdvanced && (
-            <div className="advanced-options">
-              <div>
-                <label>Custom Alias (Optional)</label>
-                <input type="text" className="url-input" placeholder="e.g. my-portfolio" value={customAlias} onChange={(e) => setCustomAlias(e.target.value)} />
-              </div>
-              <div>
-                <label>Expiration (Optional)</label>
-                <input type="datetime-local" className="url-input" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} />
-              </div>
-              <div>
-                <label>Password (Optional)</label>
-                <input type="password" className="url-input" placeholder="Secret pin/password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          {/* Result Card (Smoothly revealed under input area) */}
+          {result && (
+            <div className="result-card-container">
+              <div className="result-card">
+                <div className="result-left">
+                  <div className="result-header-label">Short link created</div>
+                  <a href={result.short_url} target="_blank" rel="noreferrer" className="result-short-url">
+                    {result.short_url}
+                  </a>
+                  <div className="result-target-url" title={result.target_url}>
+                    {result.target_url}
+                  </div>
+                  
+                  <div className="result-actions-row">
+                    <button 
+                      onClick={handleCopy} 
+                      className="btn-action primary-action"
+                      aria-label="Copy short link to clipboard"
+                    >
+                      {copied ? <><Check size={16} aria-hidden="true" /> Copied</> : <><Copy size={16} aria-hidden="true" /> Copy Link</>}
+                    </button>
+                    <a 
+                      href={result.short_url} 
+                      target="_blank" 
+                      rel="noopener noreferrer" 
+                      className="btn-action"
+                      role="button"
+                    >
+                      <ExternalLink size={16} aria-hidden="true" /> Open Link
+                    </a>
+                    <Link to={`/stats/${result.short_id}`} className="btn-action" role="button">
+                      <BarChart2 size={16} aria-hidden="true" /> Analytics
+                    </Link>
+                  </div>
+                </div>
+
+                <div className="result-right">
+                  <div className="result-qr-wrapper">
+                    <div ref={qrRef} className="qr-canvas-box">
+                      <QRCodeCanvas value={result.short_url} size={80} />
+                    </div>
+                    <div className="qr-actions-box">
+                      <h4>QR Code</h4>
+                      <p>Scan to redirect instantly</p>
+                      <button 
+                        onClick={downloadQR} 
+                        className="btn-qr-download"
+                        aria-label="Download QR code image"
+                      >
+                        <Download size={14} aria-hidden="true" /> Download QR
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}
-        </form>
-        
-        {error && (
-          <div className="error-toast">
-            <span>{error}</span>
-            <button type="button" className="toast-close" onClick={() => setError('')}>&times;</button>
-          </div>
-        )}
+        </div>
 
-        {result && (
-          <div className="result-box">
-            <div className="result-header">
-              <div>
-                <div className="result-label">Your short URL is ready:</div>
-                <a href={result.short_url} target="_blank" rel="noreferrer" className="result-url">
-                  {result.short_url}
-                </a>
+        {/* Right Column: Visual Mock Live Analytics Dashboard Preview */}
+        <div className="hero-right">
+          <div className="analytics-preview-dashboard">
+            <div className="dashboard-header-row">
+              <div className="dashboard-header-title">
+                <TrendingUp size={18} color="#3ECF8E" aria-hidden="true" />
+                <span>Live Analytics Preview</span>
               </div>
-              
-              <div className="result-actions">
-                <Link to={`/stats/${result.short_id}`} className="btn-primary">
-                  <BarChart2 size={18} /> Analytics
-                </Link>
-                <button onClick={handleCopy} className="copy-btn">
-                  {copied ? <><Check size={18} /> Copied</> : <><Copy size={18} /> Copy</>}
-                </button>
+              <span className="badge-live">Live</span>
+            </div>
+
+            {/* Clicks, Load Time, Active Links, Reliability Grid */}
+            <div className="metrics-grid-2x2">
+              <div className="metric-card-lite">
+                <span className="metric-title">Clicks</span>
+                <span className="metric-value"><AnimatedCounter value={12540} /></span>
+                <span className="metric-growth">+18.4%</span>
+              </div>
+
+              <div className="metric-card-lite">
+                <span className="metric-title">Load Time</span>
+                <span className="metric-value"><AnimatedCounter value={48} suffix="ms" /></span>
+                <span className="metric-growth">-12.0%</span>
+              </div>
+
+              <div className="metric-card-lite">
+                <span className="metric-title">Active Links</span>
+                <span className="metric-value"><AnimatedCounter value={1204} /></span>
+                <span className="metric-growth">+8.2%</span>
+              </div>
+
+              <div className="metric-card-lite">
+                <span className="metric-title">Reliability</span>
+                <span className="metric-value"><AnimatedCounter value={99.9} suffix="%" isFloat={true} /></span>
+                <span className="metric-growth">Stable</span>
               </div>
             </div>
 
-            <div className="qr-section">
-               <div ref={qrRef} className="qr-box">
-                 <QRCodeCanvas value={result.short_url} size={90} />
-               </div>
-               <div className="qr-info">
-                 <h4>Share via QR Code</h4>
-                 <p>Download and print the QR code or share it online.</p>
-                 <button onClick={downloadQR} className="copy-btn">
-                    <Download size={18} /> Download QR
-                 </button>
-               </div>
+            {/* Weekly Trend Large Chart Card (Occupies 100% Width) */}
+            <div className="mini-chart-card">
+              <span className="mini-chart-title">Click Volume Trends (Weekly)</span>
+              <div className="mini-chart-content">
+                <Line data={previewChartData} options={previewChartOptions} />
+              </div>
             </div>
           </div>
-        )}
+        </div>
+      </section>
+
+      {/* Copy Success Toast */}
+      <div 
+        className={`toast-success ${toastShow ? 'show' : ''}`}
+        role="status"
+        aria-live="polite"
+      >
+        <Check size={16} aria-hidden="true" />
+        <span>Copied to clipboard</span>
       </div>
+
+      {/* Features Grid Section */}
+      <section className="features-section" id="features">
+        <h2 className="features-section-title">Designed for modern product workflows.</h2>
+        <div className="features-grid">
+          <div className="feature-card">
+            <div className="feature-icon-wrapper">
+              <TrendingUp size={24} aria-hidden="true" />
+            </div>
+            <h3>Real-Time Analytics</h3>
+            <p>Track clicks and audience insights instantly. See where your visitors come from, their devices, and when they click.</p>
+          </div>
+
+          <div className="feature-card">
+            <div className="feature-icon-wrapper">
+              <QrCode size={24} aria-hidden="true" />
+            </div>
+            <h3>QR Code Sharing</h3>
+            <p>Generate high-resolution QR codes for easy offline sharing. Perfect for marketing campaigns, physical banners, and business cards.</p>
+          </div>
+
+          <div className="feature-card">
+            <div className="feature-icon-wrapper">
+              <Settings size={24} aria-hidden="true" />
+            </div>
+            <h3>Custom URLs</h3>
+            <p>Create memorable branded links and custom vanity aliases to increase click-through rates and build trust with your audience.</p>
+          </div>
+        </div>
+      </section>
+
+      {/* Analytics Info Section */}
+      <section className="analytics-section" id="analytics">
+        <h2 className="analytics-section-title">Deep analytics for every link.</h2>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 0.8fr', gap: '48px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '16px', lineHeight: '1.7' }}>
+              ByteLink tracks every click asynchronously to prevent adding latency to your redirects. Instantly understand who is clicking your links and optimize your distribution channels.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <h4 style={{ color: '#F3F4F6', fontSize: '15px', fontWeight: '600' }}>Geo-Location Tracking</h4>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Understand country and city distribution logs instantly on every redirect.</p>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <h4 style={{ color: '#F3F4F6', fontSize: '15px', fontWeight: '600' }}>Device Detection</h4>
+                <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Identify whether your users are browsing on mobile, desktop, or tablet devices.</p>
+              </div>
+            </div>
+          </div>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '24px', padding: '32px', display: 'flex', flexDirection: 'column', gap: '16px', boxShadow: 'var(--shadow)' }}>
+            <h4 style={{ fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)' }}>Redirect Speed</h4>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
+              <span style={{ fontSize: '48px', fontWeight: '800', color: 'var(--accent)' }}>&lt; 12ms</span>
+              <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Avg latency</span>
+            </div>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+              Built on cloud edge instances with local SQLite read replication to deliver instantaneous redirection.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Pricing Grid Section */}
+      <section className="pricing-section" id="pricing">
+        <div className="pricing-header">
+          <h2>Simple, developer-friendly pricing.</h2>
+          <p>Start for free and scale as you grow.</p>
+        </div>
+        <div className="pricing-grid">
+          <div className="pricing-card">
+            <div className="pricing-tier">Hobby</div>
+            <div className="pricing-price">
+              <span className="pricing-amount">$0</span>
+              <span className="pricing-period">/ month</span>
+            </div>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>For personal side projects and testing.</p>
+            <ul className="pricing-features-list">
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>100 links / month</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Basic analytics logs</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>QR Code generator</span>
+              </li>
+            </ul>
+            <a href="#hero-input" className="btn-pricing-action" aria-label="Get started for free on Hobby plan">Get Started</a>
+          </div>
+
+          <div className="pricing-card popular">
+            <div className="pricing-badge">Popular</div>
+            <div className="pricing-tier">Pro</div>
+            <div className="pricing-price">
+              <span className="pricing-amount">$9</span>
+              <span className="pricing-period">/ month</span>
+            </div>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>For growing products and marketing campaigns.</p>
+            <ul className="pricing-features-list">
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Unlimited links</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Detailed geo-location analytics</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Custom vanity aliases</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Password link protection</span>
+              </li>
+            </ul>
+            <a href="#hero-input" className="btn-pricing-action primary-pricing" aria-label="Upgrade to Pro plan for 9 dollars a month">Upgrade to Pro</a>
+          </div>
+
+          <div className="pricing-card">
+            <div className="pricing-tier">Enterprise</div>
+            <div className="pricing-price">
+              <span className="pricing-amount">Custom</span>
+            </div>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>For secure, large-scale APIs and corporate teams.</p>
+            <ul className="pricing-features-list">
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Dedicated edge instances</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>SSO / SAML authentication</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>99.99% redirect uptime SLA</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>API key rate limit control</span>
+              </li>
+            </ul>
+            <a href="mailto:sales@bytelink.co" className="btn-pricing-action" aria-label="Contact sales for enterprise plan">Contact Sales</a>
+          </div>
+        </div>
+      </section>
     </div>
   );
 };
