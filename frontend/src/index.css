@@ -234,11 +234,8 @@ input:focus-visible {
   font-weight: 800;
   line-height: 1.05;
   letter-spacing: -2px;
-  color: var(--text-primary);
+  color: #FFFFFF;
   margin-bottom: var(--spacing-24);
-  background: linear-gradient(to bottom, #FFFFFF 60%, #9CA3AF 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
 }
 
 .hero-desc {

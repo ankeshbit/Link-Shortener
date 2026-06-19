@@ -54,6 +54,11 @@ function RepelChar({ char }) {
         targetY = Math.sin(angle) * force * strength;
       }
 
+      // Performance: do not restart spring animations to 0 if the values are already idle at 0
+      if (targetX === 0 && targetY === 0 && x.get() === 0 && y.get() === 0) {
+        return;
+      }
+
       // Smoothly animate the motion values with spring physics
       animate(x, targetX, { type: "spring", damping: 15, stiffness: 150 });
       animate(y, targetY, { type: "spring", damping: 15, stiffness: 150 });
