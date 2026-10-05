@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import api from '../api/axios';
 import { 
   Copy, Check, BarChart2, Settings, Download, ExternalLink, QrCode, Lock, 
@@ -6,51 +6,15 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
-import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip } from 'chart.js';
-import { Line } from 'react-chartjs-2';
 import { TextRepel } from './TextRepel';
-
-// Register ChartJS modules
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip);
-
-// Animated Counter Component using requestAnimationFrame for smooth 1s ease-out counting
-const AnimatedCounter = ({ value, suffix = "", isFloat = false }) => {
-  const [displayVal, setDisplayVal] = useState(0);
-
-  useEffect(() => {
-    const numericTarget = parseFloat(value.toString().replace(/,/g, ''));
-    if (isNaN(numericTarget)) return;
-
-    const duration = 1000; // 1 second
-    const startTime = performance.now();
-
-    const run = (now) => {
-      const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      // easeOutQuad curve
-      const ease = progress * (2 - progress);
-      const current = ease * numericTarget;
-
-      setDisplayVal(current);
-
-      if (progress < 1) {
-        requestAnimationFrame(run);
-      }
-    };
-
-    requestAnimationFrame(run);
-  }, [value]);
-
-  if (isFloat) {
-    return <span>{displayVal.toFixed(1)}{suffix}</span>;
-  }
-  return <span>{Math.floor(displayVal).toLocaleString()}{suffix}</span>;
-};
+import AuthPrompt from './AuthPrompt';
+import { useAuth } from '../auth/AuthContext';
 
 const ShortenerForm = () => {
-  const [url, setUrl] = useState('');
-  const [customAlias, setCustomAlias] = useState('');
-  const [expiresAt, setExpiresAt] = useState('');
+  const { isAuthenticated } = useAuth();
+  const [url, setUrl] = useState(() => sessionStorage.getItem('shortenerDraftUrl') || '');
+  const [customAlias, setCustomAlias] = useState(() => sessionStorage.getItem('shortenerDraftAlias') || '');
+  const [expiresAt, setExpiresAt] = useState(() => sessionStorage.getItem('shortenerDraftExpiry') || '');
   const [password, setPassword] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [result, setResult] = useState(null);
@@ -58,11 +22,16 @@ const ShortenerForm = () => {
   const [toastShow, setToastShow] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [showAuthPrompt, setShowAuthPrompt] = useState(false);
   const qrRef = useRef();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!url) return;
+    if (!isAuthenticated) {
+      setShowAuthPrompt(true);
+      return;
+    }
     setLoading(true);
     setError('');
     
@@ -79,6 +48,9 @@ const ShortenerForm = () => {
 
       const res = await api.post('/api/shorten', payload);
       setResult(res.data);
+      sessionStorage.removeItem('shortenerDraftUrl');
+      sessionStorage.removeItem('shortenerDraftAlias');
+      sessionStorage.removeItem('shortenerDraftExpiry');
       setCopied(false);
       setCustomAlias('');
       setExpiresAt('');
@@ -130,79 +102,16 @@ const ShortenerForm = () => {
     }
   };
 
-  // Chart data and options for mock analytics preview
-  const previewChartData = {
-    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-    datasets: [
-      {
-        data: [140, 220, 190, 340, 290, 480, 520],
-        borderColor: '#3ECF8E',
-        backgroundColor: (context) => {
-          const chart = context.chart;
-          const {ctx, chartArea} = chart;
-          if (!chartArea) return 'rgba(62, 207, 142, 0.08)';
-          const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
-          gradient.addColorStop(0, 'rgba(62, 207, 142, 0.08)');
-          gradient.addColorStop(1, 'rgba(62, 207, 142, 0)');
-          return gradient;
-        },
-        fill: true,
-        tension: 0.4,
-        cubicInterpolationMode: 'monotone',
-        pointRadius: 0,
-        borderWidth: 3, // stroke width 3px
-      }
-    ]
-  };
-
-  const previewChartOptions = {
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: { 
-      legend: { display: false }, // no legends
-      tooltip: { 
-        enabled: true, // tooltips enabled on hover
-        backgroundColor: '#0D1321',
-        titleColor: '#fff',
-        bodyColor: '#3ECF8E',
-        borderColor: 'rgba(255,255,255,0.08)',
-        borderWidth: 1,
-        padding: 10,
-        displayColors: false
-      }
-    },
-    animation: {
-      duration: 1500, // duration 1.5s
-      easing: 'easeInOutQuart'
-    },
-    layout: {
-      padding: {
-        left: 24,
-        right: 32, // 32px from right edge
-        top: 16,
-        bottom: 24 // 24px from bottom
-      }
-    },
-    scales: {
-      x: { 
-        display: true, // Show Mon, Tue, etc.
-        ticks: {
-          color: '#6B7280',
-          font: { family: 'Geist', size: 11 }
-        },
-        grid: { display: false }, // Hide heavy grid lines
-        border: { color: 'rgba(255, 255, 255, 0.08)' } // subtle baseline axis line
-      },
-      y: { 
-        display: false,
-        min: 100, // Limit bottom height to occupy 80% of card height
-        max: 600
-      }
-    }
-  };
-
   return (
     <div>
+      {showAuthPrompt && <AuthPrompt
+        onContinue={() => setShowAuthPrompt(false)}
+        onAuthenticate={() => {
+          sessionStorage.setItem('shortenerDraftUrl', url);
+          sessionStorage.setItem('shortenerDraftAlias', customAlias);
+          sessionStorage.setItem('shortenerDraftExpiry', expiresAt);
+        }}
+      />}
       {/* Hero Section (Asymmetrical Split Grid Layout) */}
       <section className="hero-grid" id="hero">
         {/* Left Column: Input Form & Setup */}
@@ -376,50 +285,22 @@ const ShortenerForm = () => {
           )}
         </div>
 
-        {/* Right Column: Visual Mock Live Analytics Dashboard Preview */}
+        {/* Right Column: Analytics explanation without fabricated runtime data */}
         <div className="hero-right">
           <div className="analytics-preview-dashboard">
             <div className="dashboard-header-row">
               <div className="dashboard-header-title">
                 <TrendingUp size={18} color="#3ECF8E" aria-hidden="true" />
-                <span>Live Analytics Preview</span>
+                <span>Real Analytics</span>
               </div>
-              <span className="badge-live">Live</span>
+              <span className="badge-live">From your links</span>
             </div>
-
-            {/* Clicks, Load Time, Active Links, Reliability Grid */}
-            <div className="metrics-grid-2x2">
-              <div className="metric-card-lite">
-                <span className="metric-title">Clicks</span>
-                <span className="metric-value"><AnimatedCounter value={12540} /></span>
-                <span className="metric-growth">+18.4%</span>
-              </div>
-
-              <div className="metric-card-lite">
-                <span className="metric-title">Load Time</span>
-                <span className="metric-value"><AnimatedCounter value={48} suffix="ms" /></span>
-                <span className="metric-growth">-12.0%</span>
-              </div>
-
-              <div className="metric-card-lite">
-                <span className="metric-title">Active Links</span>
-                <span className="metric-value"><AnimatedCounter value={1204} /></span>
-                <span className="metric-growth">+8.2%</span>
-              </div>
-
-              <div className="metric-card-lite">
-                <span className="metric-title">Reliability</span>
-                <span className="metric-value"><AnimatedCounter value={99.9} suffix="%" isFloat={true} /></span>
-                <span className="metric-growth">Stable</span>
-              </div>
-            </div>
-
-            {/* Weekly Trend Large Chart Card (Occupies 100% Width) */}
-            <div className="mini-chart-card">
-              <span className="mini-chart-title">Click Volume Trends (Weekly)</span>
-              <div className="mini-chart-content">
-                <Line data={previewChartData} options={previewChartOptions} />
-              </div>
+            <div className="mini-chart-card" aria-label="Analytics preview">
+              <span className="mini-chart-title">Your analytics appear here</span>
+              <p className="mini-chart-description">
+                Create a link and share it to collect real click events. Dashboard
+                metrics are calculated from your stored links and visits.
+              </p>
             </div>
           </div>
         </div>
@@ -491,7 +372,7 @@ const ShortenerForm = () => {
               <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Avg latency</span>
             </div>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
-              Built on cloud edge instances with local SQLite read replication to deliver instantaneous redirection.
+              Built on cloud edge instances with PostgreSQL-backed redirects to deliver instantaneous redirection.
             </p>
           </div>
         </div>
@@ -564,7 +445,7 @@ const ShortenerForm = () => {
                 <Check size={16} aria-hidden="true" /> <span>SSO / SAML authentication</span>
               </li>
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>99.99% redirect uptime SLA</span>
+                <Check size={16} aria-hidden="true" /> <span>Reliable public redirects</span>
               </li>
               <li className="pricing-feature-item">
                 <Check size={16} aria-hidden="true" /> <span>API key rate limit control</span>

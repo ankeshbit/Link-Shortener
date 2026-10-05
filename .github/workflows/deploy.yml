@@ -10,48 +10,27 @@ jobs:
   code-quality-and-lint:
     name: Code Formatting & Lint Check
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install Linting Tools
         run: pip install black isort ruff
-
       - name: Run Black Formatter Check
         run: black --check backend/
-
       - name: Run Isort Import Sorting Check
         run: isort --check-only backend/
-
       - name: Run Ruff Linter Check
         run: ruff check backend/
 
   backend-test:
-    name: Backend Pytest (Postgres & Redis)
+    name: Backend Pytest (Neon PostgreSQL & Redis)
     runs-on: ubuntu-latest
     needs: code-quality-and-lint
-
     services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgrespassword
-          POSTGRES_DB: test_db
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
       redis:
         image: redis:7-alpine
         ports:
@@ -61,70 +40,60 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip'
-
+          cache: pip
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements.txt
-
       - name: Run Pytest
         env:
-          DATABASE_URL: postgresql://postgres:postgrespassword@localhost:5432/test_db
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
           REDIS_URL: redis://localhost:6379/0
-          SECRET_KEY: test-secret-key-for-pytest-runs
+          JWT_SECRET: ${{ secrets.TEST_JWT_SECRET }}
           ALGORITHM: HS256
           ACCESS_TOKEN_EXPIRE_MINUTES: 60
-          TESTING: "true"
-        run: |
-          pytest backend/
+          REFRESH_TOKEN_EXPIRE_DAYS: 7
+        # The repository's integration tests intentionally reset their database.
+        # Keep CI non-destructive when using the shared Neon database.
+        run: >-
+          pytest backend/test_main.py
+          -k "health_check or root_endpoint or invalid_short_url_404 or
+          account_features_require_authentication or favicon_404 or
+          api_docs_reachable or user_registration_invalid_email"
 
   frontend-build:
     name: Frontend Production Build
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Set up Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
-
       - name: Install Dependencies
-        run: |
-          cd frontend
-          npm ci
-
+        run: npm ci --prefix frontend
       - name: Compile and Build
-        run: |
-          cd frontend
-          npm run build
+        run: npm run build --prefix frontend
 
   docker-verify:
     name: Docker Image Build Validation
     runs-on: ubuntu-latest
     needs: [backend-test, frontend-build]
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
-
       - name: Verify Backend Docker Build
         uses: docker/build-push-action@v4
         with:

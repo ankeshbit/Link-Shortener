@@ -4,18 +4,15 @@ import ShortenerForm from './components/ShortenerForm';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
 import SignIn from './components/SignIn';
 import Dashboard from './components/Dashboard';
+import ProtectedRoute from './components/ProtectedRoute';
+import { AuthProvider, useAuth } from './auth/AuthContext';
 import { MagnetLines } from './components/MagnetLines';
 
 function AppContent() {
   const location = useLocation();
   const navigate = useNavigate();
   const [activeSection, setActiveSection] = useState('');
-  const [isAuthenticated, setIsAuthenticated] = useState(!!localStorage.getItem('token'));
-
-  // Sync authentication state on path navigation
-  useEffect(() => {
-    setIsAuthenticated(!!localStorage.getItem('token'));
-  }, [location.pathname]);
+  const { isAuthenticated, signOut } = useAuth();
 
   // Smooth scroll and focus logic for active section underlines via IntersectionObserver
   useEffect(() => {
@@ -105,9 +102,7 @@ function AppContent() {
   };
 
   const handleSignOut = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('refreshToken');
-    setIsAuthenticated(false);
+    signOut();
     navigate('/login');
   };
 
@@ -168,9 +163,9 @@ function AppContent() {
 
       <Routes>
         <Route path="/" element={<ShortenerForm />} />
-        <Route path="/stats/:id" element={<AnalyticsDashboard />} />
+        <Route path="/stats/:id" element={<ProtectedRoute><AnalyticsDashboard /></ProtectedRoute>} />
         <Route path="/login" element={<SignIn />} />
-        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       </Routes>
 
       <footer className="footer">
@@ -209,7 +204,9 @@ function AppContent() {
 function App() {
   return (
     <BrowserRouter>
-      <AppContent />
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
     </BrowserRouter>
   );
 }

@@ -31,12 +31,7 @@ const Dashboard = () => {
       }
     };
 
-    const token = localStorage.getItem('token');
-    if (!token) {
-      navigate('/login');
-    } else {
-      fetchUserLinks();
-    }
+    fetchUserLinks();
   }, [navigate]);
 
   const handleDelete = async (shortId) => {

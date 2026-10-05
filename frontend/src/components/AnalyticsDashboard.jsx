@@ -38,7 +38,8 @@ const AnalyticsDashboard = () => {
 
       const apiURL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
       // Convert http:// to ws:// and https:// to wss://
-      const wsURL = apiURL.replace(/^http/, 'ws') + `/api/ws/stats/${id}`;
+      const token = encodeURIComponent(localStorage.getItem('token') || '');
+      const wsURL = apiURL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${token}`;
 
       try {
         ws = new WebSocket(wsURL);

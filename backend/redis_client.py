@@ -12,67 +12,23 @@ except ImportError:
     redis = None
 
 
-class MockRedis:
-    """Fallback in-memory caching and rate-limiting store if Redis is unavailable."""
-
-    def __init__(self):
-        self.data = {}
-        self.expires = {}
-
-    def _cleanup(self, key):
-        if key in self.expires and time.time() > self.expires[key]:
-            if key in self.data:
-                del self.data[key]
-            del self.expires[key]
-
-    def get(self, key):
-        self._cleanup(key)
-        return self.data.get(key)
-
-    def set(self, key, value, ex=None):
-        self.data[key] = str(value)
-        if ex is not None:
-            self.expires[key] = time.time() + ex
-        return True
-
-    def incr(self, key):
-        self._cleanup(key)
-        if key not in self.data:
-            self.data[key] = "0"
-        try:
-            val = int(self.data[key]) + 1
-            self.data[key] = str(val)
-            return val
-        except ValueError:
-            return 1
-
-    def expire(self, key, seconds):
-        self._cleanup(key)
-        if key in self.data:
-            self.expires[key] = time.time() + seconds
-            return True
-        return False
-
-    def ping(self):
-        return True
-
-
 class SafeRedisClient:
-    """Wrapper that catches Redis errors and falls back gracefully to MockRedis."""
+    """Redis cache client; PostgreSQL remains the source of truth."""
 
     def __init__(self):
-        self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.redis_url = os.getenv("REDIS_URL")
         self.client = None
-        self.fallback = MockRedis()
         self.last_reconnect_attempt = 0
         self.reconnect_cooldown = 10  # Try reconnecting at most once every 10 seconds
         self._init_client()
 
     def _init_client(self):
         self.last_reconnect_attempt = time.time()
+        if not self.redis_url:
+            logger.warning("REDIS_URL is not configured; Redis features are disabled.")
+            return
         if redis is None:
-            logger.warning("Redis package is not installed. Using MockRedis fallback.")
-            self.client = None
+            logger.warning("Redis package is not installed; Redis features are disabled.")
             return
 
         try:
@@ -88,7 +44,7 @@ class SafeRedisClient:
             logger.info("Connected to Redis server successfully.")
         except Exception as e:
             logger.warning(
-                f"Could not connect to Redis at {self.redis_url} ({e}). Using MockRedis fallback."
+                f"Could not connect to configured Redis ({e}). Redis features are disabled."
             )
             self.client = None
 
@@ -110,16 +66,14 @@ class SafeRedisClient:
                 return method(*args, **kwargs)
             except Exception as e:
                 logger.error(
-                    f"Redis operation '{method_name}' failed: {e}. Falling back to MockRedis."
+                    f"Redis operation '{method_name}' failed: {e}."
                 )
                 self.client = (
                     None  # Set client to None to trigger reconnect logic next time
                 )
                 self.last_reconnect_attempt = time.time()
 
-        # Fallback execution
-        method = getattr(self.fallback, method_name)
-        return method(*args, **kwargs)
+        return None
 
     def get(self, key):
         return self._execute("get", key)
@@ -142,7 +96,7 @@ class SafeRedisClient:
             except Exception:
                 self.client = None
                 return False
-        return self.fallback.ping()
+        return False
 
 
 # Global Singleton Client instance

@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlsplit
 
 import httpx
 import models
@@ -30,7 +31,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from loguru import logger
-from pydantic import BaseModel, EmailStr, HttpUrl, ValidationError
+from pydantic import BaseModel, EmailStr, ValidationError, field_validator
 from redis_client import redis_cache
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -63,11 +64,11 @@ async def lifespan(app: FastAPI):
             logger.info("Redis connectivity verified successfully.")
         else:
             logger.warning(
-                "Redis ping returned False. Running in degraded fallback mode."
+                "Redis ping returned False. Running in degraded mode."
             )
     except Exception as e:
         logger.warning(
-            f"Redis connection verification failed: {e}. Running in degraded fallback mode."
+            f"Redis connection verification failed: {e}. Running in degraded mode."
         )
 
     yield
@@ -189,9 +190,25 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 # Configure CORS Origins
 FRONTEND_URL = os.getenv("FRONTEND_URL")
+ENVIRONMENT = os.getenv("ENV", "development").strip().lower()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+if not PUBLIC_BASE_URL and ENVIRONMENT != "production":
+    PUBLIC_BASE_URL = os.getenv("BASE_URL")
+if not PUBLIC_BASE_URL:
+    raise RuntimeError(
+        "PUBLIC_BASE_URL environment variable is required in production."
+    )
+PUBLIC_BASE_URL = PUBLIC_BASE_URL.rstrip("/")
+parsed_public_url = urlsplit(PUBLIC_BASE_URL)
+if parsed_public_url.scheme not in {"http", "https"} or not parsed_public_url.netloc:
+    raise RuntimeError("PUBLIC_BASE_URL must be an absolute HTTP(S) URL.")
+if ENVIRONMENT == "production" and parsed_public_url.scheme != "https":
+    raise RuntimeError("PUBLIC_BASE_URL must use HTTPS in production.")
 
-# Build the list of allowed origins
-origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Build the list of allowed origins. Local origins are development-only.
+origins = []
+if os.getenv("ENV", "development") != "production":
+    origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
 if FRONTEND_URL:
     for url in FRONTEND_URL.split(","):
         trimmed = url.strip()
@@ -293,6 +310,8 @@ def rate_limit(request: Request):
     key = f"rate_limit:{client_ip}"
     try:
         current = redis_cache.incr(key)
+        if current is None:
+            return True
         if current == 1:
             redis_cache.expire(key, 60)
         if current > 20:
@@ -342,61 +361,72 @@ def compile_stats(url: models.URL, db: Session) -> dict:
     }
 
 
-def track_click(short_id: str, db: Session, user_agent: str, ip: str):
-    url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
-    if not url:
-        return
+def track_click(short_id: str, user_agent: str, ip: str):
+    # Background tasks run after the request dependency may have been closed.
+    with SessionLocal() as db:
+        url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
+        if not url:
+            logger.warning(f"Could not log click for missing short_id: {short_id}")
+            return
 
-    url.clicks_count += 1
+        url.clicks_count += 1
 
-    country, city, lat, lon = None, None, None, None
-    if ip and ip != "127.0.0.1" and ip != "localhost":
+        country, city, lat, lon = None, None, None, None
+        if ip and ip != "127.0.0.1" and ip != "localhost":
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    res = client.get(f"http://ip-api.com/json/{ip}").json()
+                if res.get("status") == "success":
+                    country = res.get("country")
+                    city = res.get("city")
+                    lat = res.get("lat")
+                    lon = res.get("lon")
+            except Exception as e:
+                logger.error(f"IP lookup failed for {ip}: {e}")
+
+        click = models.ClickEvent(
+            url_id=url.id,
+            ip_address=ip,
+            country=country,
+            city=city,
+            lat=lat,
+            lon=lon,
+            user_agent=user_agent,
+        )
         try:
-            with httpx.Client(timeout=2.0) as client:
-                res = client.get(f"http://ip-api.com/json/{ip}").json()
-            if res.get("status") == "success":
-                country = res.get("country")
-                city = res.get("city")
-                lat = res.get("lat")
-                lon = res.get("lon")
+            db.add(click)
+            db.commit()
+            logger.info(
+                f"Click logged for short_id: {short_id}. Total clicks: {url.clicks_count}"
+            )
         except Exception as e:
-            logger.error(f"IP lookup failed for {ip}: {e}")
+            db.rollback()
+            logger.error(f"Failed to log click for short_id {short_id}: {e}")
+            return
 
-    click = models.ClickEvent(
-        url_id=url.id,
-        ip_address=ip,
-        country=country,
-        city=city,
-        lat=lat,
-        lon=lon,
-        user_agent=user_agent,
-    )
-    try:
-        db.add(click)
-        db.commit()
-        logger.info(
-            f"Click logged for short_id: {short_id}. Total clicks: {url.clicks_count}"
-        )
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to log click for short_id {short_id}: {e}")
-        return
-
-    # Broadcast real-time update to active WebSockets listeners
-    stats_data = compile_stats(url, db)
-    if loop and loop.is_running():
-        asyncio.run_coroutine_threadsafe(
-            manager.broadcast(short_id, {"type": "click_update", "data": stats_data}),
-            loop,
-        )
+        # Broadcast real-time update to active WebSockets listeners
+        stats_data = compile_stats(url, db)
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                manager.broadcast(short_id, {"type": "click_update", "data": stats_data}),
+                loop,
+            )
 
 
 # Pydantic schemas
 class URLCreate(BaseModel):
-    target_url: HttpUrl
+    target_url: str
     custom_alias: Optional[str] = None
     expires_at: Optional[datetime] = None
     password: Optional[str] = None
+
+    @field_validator("target_url")
+    @classmethod
+    def validate_target_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("target_url must be an absolute HTTP(S) URL")
+        return value
 
 
 class UserRegister(BaseModel):
@@ -407,11 +437,6 @@ class UserRegister(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
-
-
-class GoogleAuthRequest(BaseModel):
-    email: EmailStr
-    google_id: str
 
 
 # Authentication routes
@@ -454,29 +479,6 @@ def login_user(item: UserLogin, db: Session = Depends(get_db)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
         )
-
-    access_token = security.create_access_token(data={"sub": str(user.id)})
-    refresh_token = security.create_refresh_token(data={"sub": str(user.id)})
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-    }
-
-
-@app.post("/api/auth/google")
-def google_auth(item: GoogleAuthRequest, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.google_id == item.google_id).first()
-    if not user:
-        user = db.query(models.User).filter(models.User.email == item.email).first()
-        if user:
-            user.google_id = item.google_id
-            db.commit()
-        else:
-            user = models.User(email=item.email, google_id=item.google_id)
-            db.add(user)
-            db.commit()
-            db.refresh(user)
 
     access_token = security.create_access_token(data={"sub": str(user.id)})
     refresh_token = security.create_refresh_token(data={"sub": str(user.id)})
@@ -538,15 +540,10 @@ def get_user_me(
 # User Links APIs
 @app.get("/api/user/links")
 def get_user_links(
-    current_user_id: Optional[int] = Depends(security.get_current_user_id),
+    current_user_id: int = Depends(security.require_current_user_id),
     db: Session = Depends(get_db),
 ):
-    if not current_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
-        )
     urls = db.query(models.URL).filter(models.URL.user_id == current_user_id).all()
-    base_url = os.getenv("BASE_URL", "http://localhost:8000")
     return [
         {
             "id": url.id,
@@ -555,7 +552,7 @@ def get_user_links(
             "clicks_count": url.clicks_count,
             "created_at": url.created_at,
             "expires_at": url.expires_at,
-            "short_url": f"{base_url}/{url.short_id}",
+            "short_url": f"{PUBLIC_BASE_URL}/{url.short_id}",
         }
         for url in urls
     ]
@@ -564,13 +561,9 @@ def get_user_links(
 @app.delete("/api/user/links/{short_id}")
 def delete_user_link(
     short_id: str,
-    current_user_id: Optional[int] = Depends(security.get_current_user_id),
+    current_user_id: int = Depends(security.require_current_user_id),
     db: Session = Depends(get_db),
 ):
-    if not current_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
-        )
     url = (
         db.query(models.URL)
         .filter(models.URL.short_id == short_id, models.URL.user_id == current_user_id)
@@ -600,7 +593,7 @@ def create_short_url(
     item: URLCreate,
     request: Request,
     db: Session = Depends(get_db),
-    current_user_id: Optional[int] = Depends(security.get_current_user_id),
+    current_user_id: int = Depends(security.require_current_user_id),
 ):
     target_url_str = str(item.target_url)
 
@@ -649,11 +642,10 @@ def create_short_url(
     except Exception as e:
         logger.warning(f"Could not write cache entry for {short_id}: {e}")
 
-    base_url = os.getenv("BASE_URL", "http://localhost:8000")
     return {
         "short_id": short_id,
         "target_url": target_url_str,
-        "short_url": f"{base_url}/{short_id}",
+        "short_url": f"{PUBLIC_BASE_URL}/{short_id}",
     }
 
 
@@ -759,7 +751,7 @@ def redirect_url(
 
     user_agent = request.headers.get("user-agent", "Unknown")
     ip = request.client.host
-    background_tasks.add_task(track_click, short_id, db, user_agent, ip)
+    background_tasks.add_task(track_click, short_id, user_agent, ip)
 
     return RedirectResponse(url=target_url)
 
@@ -802,34 +794,49 @@ def verify_password_and_redirect(
 
     user_agent = request.headers.get("user-agent", "Unknown")
     ip = request.client.host
-    background_tasks.add_task(track_click, short_id, db, user_agent, ip)
+    background_tasks.add_task(track_click, short_id, user_agent, ip)
 
     return RedirectResponse(url=url.target_url, status_code=303)
 
 
 # Static API endpoint stats
 @app.get("/api/stats/{short_id}")
-def get_stats(short_id: str, db: Session = Depends(get_db)):
+def get_stats(
+    short_id: str,
+    current_user_id: int = Depends(security.require_current_user_id),
+    db: Session = Depends(get_db),
+):
     url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
-    if not url:
-        raise HTTPException(status_code=404, detail="URL not found")
+    if not url or url.user_id != current_user_id:
+        raise HTTPException(status_code=404, detail="Link not found")
 
+    if url.user_id is None:
+        raise HTTPException(status_code=404, detail="Analytics not available")
     return compile_stats(url, db)
 
 
 # Live WebSockets endpoint stats
 @app.websocket("/api/ws/stats/{short_id}")
 async def websocket_stats(websocket: WebSocket, short_id: str):
+    token = websocket.query_params.get("token")
+    current_user_id = security.get_current_user_id_from_token(token)
+    if current_user_id is None:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+
     await manager.connect(short_id, websocket)
     try:
         # Send initial data compilation
         with SessionLocal() as db:
             url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
-            if url:
+            if url and url.user_id == current_user_id:
                 initial_stats = compile_stats(url, db)
                 await websocket.send_json(
                     {"type": "initial_stats", "data": initial_stats}
                 )
+            else:
+                await websocket.close(code=1008, reason="Link not found")
+                return
 
         # Loop to keep socket active
         while True:

@@ -2,6 +2,35 @@
 
 ByteLink is a production-grade, full-stack URL Shortener application built with modern web technologies. It provides instantaneous link redirections, custom alias creations, password lock protections, user authentication dashboards, and real-time geographical analytics streaming via WebSockets.
 
+## Database: Neon PostgreSQL
+
+Neon PostgreSQL is the application's single database source of truth. The backend
+uses SQLAlchemy with the PostgreSQL driver and Alembic migrations; no local database
+container is required.
+
+1. Copy `backend/.env.example` to `backend/.env`.
+2. Set the backend-only `DATABASE_URL` to the Neon connection string, including
+   `?sslmode=require`.
+3. Run `alembic upgrade head` from `backend`.
+4. Start the backend and frontend using the existing commands below.
+
+Never put `DATABASE_URL` in frontend environment variables, source code, logs, or
+version control. Back up existing data before pointing the application at a new Neon
+database or branch. The initial migration creates the existing `users`, `urls`, and
+`click_events` tables with their ownership and cascade relationships.
+
+## Access model
+
+Browsing is public: the homepage, informational content, and every valid short URL can
+be opened without an account. Short URL resolution never uses authentication and
+continues to redirect visitors (or show the existing link-password prompt).
+
+Account-owned usage requires authentication. Creating links, opening the dashboard,
+listing or deleting links, and viewing analytics require a bearer access token. The
+frontend protects private routes centrally and preserves the requested route through
+login/signup. The backend independently validates the token and filters link and
+analytics data by the authenticated user's `user_id`.
+
 ---
 
 ## Features
@@ -115,22 +144,23 @@ Link-Shortener/
 
 ```env
 # Base URL of the deployed FastAPI server (used in short URL generation)
-BASE_URL=http://localhost:8000
+PUBLIC_BASE_URL=http://localhost:8000
 
-# PostgreSQL connection string
-DATABASE_URL=postgresql://user:password@host:5432/dbname
+# Neon PostgreSQL connection string (backend only)
+DATABASE_URL=postgresql://USER:PASSWORD@EP-example-pooler.us-east-2.aws.neon.tech/DATABASE?sslmode=require
 
 # Redis connection string — use rediss:// for TLS (required for Upstash)
 REDIS_URL=rediss://default:password@host:6379
 
 # JWT signing secret (generate a strong random key in production)
-SECRET_KEY=your-super-secret-key-change-me
+# JWT_SECRET must be configured in the backend environment.
 
 # JWT algorithm
 ALGORITHM=HS256
 
 # Access token lifetime in minutes
 ACCESS_TOKEN_EXPIRE_MINUTES=60
+REFRESH_TOKEN_EXPIRE_DAYS=7
 
 # Allowed frontend origin(s) — comma-separated for multiple origins
 # Note: all *.vercel.app origins are automatically allowed via regex regardless of this value
@@ -154,7 +184,7 @@ VITE_API_URL=http://localhost:8000
 ### Prerequisites
 - Python 3.11+
 - Node.js 22+
-- PostgreSQL (local or cloud e.g. Neon)
+- Neon PostgreSQL
 - Redis (local or cloud e.g. Upstash)
 
 ### 1. Database Migrations
@@ -288,29 +318,31 @@ app.add_middleware(
 
 ## Docker Compose
 
-Boot the complete stack locally (PostgreSQL + Redis + FastAPI):
+Boot the backend and Redis locally while connecting to Neon PostgreSQL:
 
 ```bash
 docker-compose up --build
 ```
 
-Health checks ensure containers start in dependency order (Postgres → Redis → Backend).
+The backend reads DATABASE_URL from backend/.env; only Redis runs as a local container.
 
 ---
 
 ## Cloud Deployment
 
-### Render (Backend + Database + Redis)
+### Render (Backend + Redis)
 
 1. Connect your GitHub repository to Render.
 2. Apply the `render.yaml` blueprint — it automatically provisions:
-   - **Web Service:** FastAPI (Python 3.11, auto-migrates DB on build)
+   - **Web Service:** FastAPI (Python 3.11)
    - **Redis Instance:** Internal TLS connection
-   - **PostgreSQL Database:** Auto-injects `DATABASE_URL`
+   - **Neon PostgreSQL:** Set `DATABASE_URL` as a protected environment variable
 3. In the Render dashboard, set the following environment variables manually:
+   - `JWT_SECRET` → a strong secret stored only in Render
    - `FRONTEND_URL` → your Vercel deployment URL (e.g. `https://bytelink.vercel.app`)
-   - `BASE_URL` → your Render web service URL (e.g. `https://link-shortener-backend.onrender.com`)
-4. Trigger a manual deploy or push to `main`.
+   - `PUBLIC_BASE_URL` → your Render web service HTTPS URL (for example, `https://link-shortener-backend.onrender.com`). This is the URL encoded into generated QR codes.
+4. Run `alembic upgrade head` from the backend directory as a one-off migration step against Neon before the first production deploy, or run it from a protected deployment job.
+5. Trigger a manual deploy or push to `main`.
 
 ### Vercel (Frontend)
 
@@ -324,7 +356,7 @@ Health checks ensure containers start in dependency order (Postgres → Redis �
 
 ## Security Notes
 
-- JWT tokens are signed with `HS256` using a secret key — **always set a strong `SECRET_KEY` in production**.
+- JWT tokens are signed with `HS256` using the backend-only `JWT_SECRET` environment variable.
 - Passwords are hashed using `bcrypt` directly (no deprecated wrapper libraries).
 - Link passwords use SHA-256 before bcrypt to avoid bcrypt's 72-byte input limit.
 - Redis connection uses TLS (`rediss://`) in production via Upstash.

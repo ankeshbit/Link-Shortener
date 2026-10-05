@@ -26,6 +26,18 @@ def database_alive():
         return False
 
 
+def register_token(prefix="testuser"):
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "email": f"{prefix}_{os.urandom(4).hex()}@bytelink.co",
+            "password": "SuperSecurePassword123!",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["access_token"]
+
+
 # Setup schema on test startup if database is alive
 if database_alive():
     Base.metadata.create_all(bind=engine)
@@ -71,6 +83,15 @@ def test_invalid_short_url_404():
     """Asserts that non-existent short URL returns 404 error."""
     response = client.get("/nonexistent-short-id-12345")
     assert response.status_code == 404
+
+
+def test_account_features_require_authentication():
+    """Account-owned link operations must reject unauthenticated requests."""
+    assert client.post(
+        "/api/shorten", json={"target_url": "https://example.com"}
+    ).status_code == 401
+    assert client.get("/api/user/links").status_code == 401
+    assert client.get("/api/stats/not-a-link").status_code == 401
 
 
 def test_favicon_404():
@@ -142,13 +163,19 @@ def test_auth_registration_and_login():
     not database_alive(), reason="PostgreSQL test database not available"
 )
 def test_short_link_flow():
-    """Tests shortened link creation, redirection, alias conflict, and custom parameters."""
+    """Tests authenticated creation while keeping redirect resolution public."""
+    headers = {"Authorization": f"Bearer {register_token('shortener')}"}
     alias = f"alias_{os.urandom(4).hex()}"
     target = "https://google.com"
 
-    # 1. Create short url
+    # Anonymous creation is no longer an account-free operation.
+    assert client.post("/api/shorten", json={"target_url": target}).status_code == 401
+
+    # Authenticated users can create short URLs.
     create_resp = client.post(
-        "/api/shorten", json={"target_url": target, "custom_alias": alias}
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers=headers,
     )
     assert create_resp.status_code == 200
     create_data = create_resp.json()
@@ -159,7 +186,9 @@ def test_short_link_flow():
 
     # 2. Re-create same alias, expect conflict 409
     conflict_resp = client.post(
-        "/api/shorten", json={"target_url": "https://yahoo.com", "custom_alias": alias}
+        "/api/shorten",
+        json={"target_url": "https://yahoo.com", "custom_alias": alias},
+        headers=headers,
     )
     assert conflict_resp.status_code == 409
 
@@ -185,6 +214,7 @@ def test_password_protected_short_link():
     create_resp = client.post(
         "/api/shorten",
         json={"target_url": target, "custom_alias": alias, "password": password},
+        headers={"Authorization": f"Bearer {register_token('password')}"},
     )
     assert create_resp.status_code == 200
 
@@ -209,14 +239,13 @@ def test_password_protected_short_link():
     )
 
 
-def test_cache_fallback():
-    """Asserts that SafeRedisClient functions properly without crashing even if Redis goes down."""
-    # Write to cache
-    redis_cache.set("test_key", "test_value", ex=5)
-    # Read from cache
-    val = redis_cache.get("test_key")
-    assert val == "test_value"
+def test_cache_unavailable_does_not_fabricate_data():
+    """Redis absence must not create an in-memory application-data source."""
+    if redis_cache.client is None:
+        assert redis_cache.get("missing-test-key") is None
+        assert redis_cache.incr("missing-test-counter") is None
+        return
 
-    # Increment counter
-    incr_val = redis_cache.incr("test_counter")
-    assert incr_val >= 1
+    redis_cache.set("test_key", "test_value", ex=5)
+    assert redis_cache.get("test_key") == "test_value"
+    assert redis_cache.incr("test_counter") >= 1

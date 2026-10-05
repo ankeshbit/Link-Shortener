@@ -214,6 +214,64 @@ input:focus-visible {
   transform: translateY(-2px);
 }
 
+.auth-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-24);
+  background: rgba(7, 11, 20, 0.78);
+  backdrop-filter: blur(8px);
+}
+
+.auth-prompt-card {
+  width: min(100%, 440px);
+  padding: var(--spacing-32);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.auth-prompt-card h2 {
+  margin-bottom: var(--spacing-12);
+}
+
+.auth-prompt-card p {
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: var(--spacing-24);
+}
+
+.auth-prompt-actions {
+  display: flex;
+  gap: var(--spacing-12);
+  justify-content: center;
+}
+
+.auth-prompt-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 120px;
+  min-height: 48px;
+  padding: 10px 16px;
+  white-space: nowrap;
+}
+
+.auth-prompt-dismiss {
+  margin-top: var(--spacing-20);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
 /* Layout Columns */
 .hero-grid {
   display: grid;
@@ -280,11 +338,14 @@ input:focus-visible {
 }
 
 .url-input-new {
+  appearance: none;
   flex: 1;
-  background: transparent;
+  min-width: 0;
+  background-color: #0F172A;
   border: none;
   outline: none;
   color: var(--text-primary);
+  caret-color: var(--accent);
   font-size: 16px;
   height: 100%;
   font-family: inherit;
@@ -292,6 +353,31 @@ input:focus-visible {
 
 .url-input-new::placeholder {
   color: var(--text-muted);
+  opacity: 1;
+}
+
+.url-input-new::selection {
+  background: rgba(62, 207, 142, 0.3);
+  color: var(--text-primary);
+}
+
+.url-input-new:focus {
+  background-color: #0F172A;
+}
+
+.url-input-new:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.url-input-new:-webkit-autofill,
+.url-input-new:-webkit-autofill:hover,
+.url-input-new:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text-primary);
+  -webkit-box-shadow: 0 0 0 1000px #0F172A inset;
+  box-shadow: 0 0 0 1000px #0F172A inset;
+  caret-color: var(--accent);
+  transition: background-color 9999s ease-out 0s;
 }
 
 .btn-generate {
@@ -690,8 +776,13 @@ input:focus-visible {
   border: 1px solid var(--border);
   border-radius: 24px;
   padding: 28px; /* padding 28px as per Problem 3 */
-  height: 260px;
-  position: relative; /* relative for absolute children */
+  min-height: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
   box-shadow: var(--shadow);
   overflow: hidden;
   box-sizing: border-box;
@@ -705,14 +796,16 @@ input:focus-visible {
 }
 
 .mini-chart-title {
-  position: absolute;
-  top: 24px;
-  left: 28px;
   font-size: 15px;
   font-weight: 500;
   color: #94A3B8;
-  z-index: 10;
-  pointer-events: none;
+  line-height: 1.4;
+}
+
+.mini-chart-description {
+  max-width: 34rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
 }
 
 /* Vertically center graph, occupy 80% of card height (208px) */
@@ -1422,6 +1515,11 @@ input:focus-visible {
     gap: var(--spacing-16);
   }
 
+  .analytics-section > div {
+    grid-template-columns: 1fr !important;
+    gap: var(--spacing-32) !important;
+  }
+
   .pricing-grid {
     grid-template-columns: 1fr;
     gap: var(--spacing-16);
@@ -1440,5 +1538,21 @@ input:focus-visible {
     width: 100%;
     justify-content: space-between;
     gap: var(--spacing-24);
+  }
+
+  .auth-prompt {
+    padding: var(--spacing-16);
+  }
+
+  .auth-prompt-card {
+    padding: var(--spacing-24);
+  }
+
+  .auth-prompt-actions {
+    flex-direction: column;
+  }
+
+  .auth-prompt-actions button {
+    width: 100%;
   }
 }
