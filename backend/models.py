@@ -13,6 +13,7 @@ class User(Base):
         String(255), nullable=True
     )  # Nullable to allow passwordless OAuth registration
     google_id = Column(String(255), unique=True, index=True, nullable=True)
+    firebase_uid = Column(String(128), unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Cascade deletes: If a user account is deleted, remove their links too

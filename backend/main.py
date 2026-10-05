@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import httpx
 import models
 import security
+from firebase_config import initialize_firebase
 
 # Local imports
 from database import SessionLocal, engine, get_db
@@ -49,6 +50,9 @@ async def lifespan(app: FastAPI):
     global loop
     loop = asyncio.get_running_loop()
     logger.info("FastAPI application starting up...")
+
+    # Initialize Firebase Admin SDK
+    initialize_firebase()
 
     # Verify Database Connectivity
     try:
@@ -525,19 +529,26 @@ def refresh_token(item: TokenRefreshRequest, db: Session = Depends(get_db)):
 
 @app.get("/api/auth/me")
 def get_user_me(
-    current_user_id: Optional[int] = Depends(security.get_current_user_id),
-    db: Session = Depends(get_db),
+    current_user: models.User = Depends(security.require_current_user),
 ):
-    if not current_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
-        )
-    user = db.query(models.User).filter(models.User.id == current_user_id).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
-        )
-    return {"id": user.id, "email": user.email}
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "firebase_uid": current_user.firebase_uid,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+    }
+
+
+@app.post("/api/auth/sync")
+def sync_user(
+    current_user: models.User = Depends(security.require_current_user),
+):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "firebase_uid": current_user.firebase_uid,
+        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+    }
 
 
 # User Links APIs
@@ -822,25 +833,23 @@ def get_stats(
 @app.websocket("/api/ws/stats/{short_id}")
 async def websocket_stats(websocket: WebSocket, short_id: str):
     token = websocket.query_params.get("token")
-    current_user_id = security.get_current_user_id_from_token(token)
-    if current_user_id is None:
-        await websocket.close(code=1008, reason="Authentication required")
-        return
+    with SessionLocal() as db:
+        user = security.get_current_user_from_token(token, db)
+        if user is None:
+            await websocket.close(code=1008, reason="Authentication required")
+            return
+        current_user_id = user.id
+        url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
+        if not url or url.user_id != current_user_id:
+            await websocket.close(code=1008, reason="Link not found or unauthorized")
+            return
+        initial_stats = compile_stats(url, db)
 
     await manager.connect(short_id, websocket)
     try:
-        # Send initial data compilation
-        with SessionLocal() as db:
-            url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
-            if url and url.user_id == current_user_id:
-                initial_stats = compile_stats(url, db)
-                await websocket.send_json(
-                    {"type": "initial_stats", "data": initial_stats}
-                )
-            else:
-                await websocket.close(code=1008, reason="Link not found")
-                return
-
+        await websocket.send_json(
+            {"type": "initial_stats", "data": initial_stats}
+        )
         # Loop to keep socket active
         while True:
             await websocket.receive_text()

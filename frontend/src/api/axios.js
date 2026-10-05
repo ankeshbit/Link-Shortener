@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { auth } from '../auth/firebase';
 
 const configuredApiURL = import.meta.env.VITE_API_URL?.trim();
 export const API_BASE_URL = (
@@ -16,17 +17,30 @@ const api = axios.create({
   },
 });
 
+// Request interceptor: Attach fresh Firebase ID token
 api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
+  async (config) => {
+    try {
+      let token = null;
+      if (auth.currentUser) {
+        token = await auth.currentUser.getIdToken();
+        localStorage.setItem('token', token);
+      } else {
+        token = localStorage.getItem('token');
+      }
+
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+    } catch (e) {
+      console.warn('Could not attach token to outgoing request:', e);
     }
     return config;
   },
   (error) => Promise.reject(error)
 );
 
+// Response interceptor: Auto-refresh Firebase ID token on 401
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -35,23 +49,16 @@ api.interceptors.response.use(
       error.response?.status === 401 &&
       originalRequest &&
       !originalRequest._retry &&
-      localStorage.getItem('refreshToken')
+      auth.currentUser
     ) {
       originalRequest._retry = true;
       try {
-        const res = await axios.post(`${API_BASE_URL}/api/auth/refresh`, {
-          refresh_token: localStorage.getItem('refreshToken'),
-        });
-        const { access_token, refresh_token: newRefreshToken } = res.data;
-        localStorage.setItem('token', access_token);
-        if (newRefreshToken) {
-          localStorage.setItem('refreshToken', newRefreshToken);
-        }
-        originalRequest.headers.Authorization = `Bearer ${access_token}`;
+        const freshToken = await auth.currentUser.getIdToken(true);
+        localStorage.setItem('token', freshToken);
+        originalRequest.headers.Authorization = `Bearer ${freshToken}`;
         return api(originalRequest);
       } catch (refreshError) {
         localStorage.removeItem('token');
-        localStorage.removeItem('refreshToken');
         window.dispatchEvent(new Event('authchange'));
         return Promise.reject(refreshError);
       }

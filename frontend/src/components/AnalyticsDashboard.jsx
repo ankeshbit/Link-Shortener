@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import api, { API_BASE_URL } from '../api/axios';
+import { auth } from '../auth/firebase';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { ArrowLeft, MapPin, Clock } from 'lucide-react';
@@ -33,12 +34,23 @@ const AnalyticsDashboard = () => {
       }
     };
 
-    const connectWS = () => {
+    const connectWS = async () => {
       if (!isMounted) return;
 
+      let token = '';
+      try {
+        if (auth.currentUser) {
+          token = await auth.currentUser.getIdToken();
+          localStorage.setItem('token', token);
+        } else {
+          token = localStorage.getItem('token') || '';
+        }
+      } catch {
+        token = localStorage.getItem('token') || '';
+      }
+
       // Convert http:// to ws:// and https:// to wss://
-      const token = encodeURIComponent(localStorage.getItem('token') || '');
-      const wsURL = API_BASE_URL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${token}`;
+      const wsURL = API_BASE_URL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${encodeURIComponent(token)}`;
 
       try {
         ws = new WebSocket(wsURL);

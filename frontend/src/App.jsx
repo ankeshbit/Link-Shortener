@@ -12,7 +12,7 @@ function AppContent() {
   const location = useLocation();
   const navigate = useNavigate();
   const [activeSection, setActiveSection] = useState('');
-  const { isAuthenticated, signOut } = useAuth();
+  const { isAuthenticated, signOut, user } = useAuth();
 
   // Smooth scroll and focus logic for active section underlines via IntersectionObserver
   useEffect(() => {
@@ -145,7 +145,16 @@ function AppContent() {
           </a>
           {isAuthenticated ? (
             <>
-              <Link to="/dashboard" className="nav-link">Dashboard</Link>
+              <Link to="/dashboard" className="nav-link" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {user?.photoURL && (
+                  <img
+                    src={user.photoURL}
+                    alt={user.displayName || 'User'}
+                    style={{ width: '22px', height: '22px', borderRadius: '50%', objectFit: 'cover' }}
+                  />
+                )}
+                <span>Dashboard</span>
+              </Link>
               <button 
                 onClick={handleSignOut} 
                 className="nav-link" 

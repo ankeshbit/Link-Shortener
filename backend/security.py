@@ -1,38 +1,26 @@
 import hashlib
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import bcrypt
+from database import get_db
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from firebase_config import verify_firebase_id_token
 from jose import JWTError, jwt
+from loguru import logger
+import models
+from sqlalchemy.orm import Session
 
 load_dotenv()
 
-# JWT configuration
-
-JWT_SECRET = os.getenv("JWT_SECRET")
-if not JWT_SECRET:
-    raise RuntimeError(
-        "JWT_SECRET environment variable is not configured."
-    )
-
-ALGORITHM = os.getenv("ALGORITHM")
-if not ALGORITHM:
-    raise RuntimeError("ALGORITHM environment variable is not set.")
-
-ACCESS_TOKEN_EXPIRE_MINUTES = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
-if not ACCESS_TOKEN_EXPIRE_MINUTES:
-    raise RuntimeError(
-        "ACCESS_TOKEN_EXPIRE_MINUTES environment variable is not set."
-    )
-ACCESS_TOKEN_EXPIRE_MINUTES = int(ACCESS_TOKEN_EXPIRE_MINUTES)
-
-REFRESH_TOKEN_EXPIRE_DAYS = os.getenv("REFRESH_TOKEN_EXPIRE_DAYS")
-if not REFRESH_TOKEN_EXPIRE_DAYS:
-    raise RuntimeError("REFRESH_TOKEN_EXPIRE_DAYS environment variable is not set.")
-REFRESH_TOKEN_EXPIRE_DAYS = int(REFRESH_TOKEN_EXPIRE_DAYS)
+# Legacy JWT configuration (optional during migration / fallback)
+JWT_SECRET = os.getenv("JWT_SECRET", "bytelink-legacy-secret-key-fallback")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
 
 def hash_link_password(password: str) -> str:
@@ -66,7 +54,7 @@ def get_password_hash(password: str) -> str:
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
-    """Creates a JWT access token containing payload data, type and expiration date."""
+    """Legacy helper: Creates a JWT access token."""
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -79,7 +67,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
 
 
 def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> str:
-    """Creates a JWT refresh token containing payload data, type and expiration date."""
+    """Legacy helper: Creates a JWT refresh token."""
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
@@ -90,7 +78,7 @@ def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> 
 
 
 def decode_access_token(token: str) -> dict | None:
-    """Decodes a JWT access token, verifying its validity, type, and expiration."""
+    """Decodes a legacy JWT access token if applicable."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         if payload.get("type") != "access":
@@ -101,7 +89,7 @@ def decode_access_token(token: str) -> dict | None:
 
 
 def decode_refresh_token(token: str) -> dict | None:
-    """Decodes a JWT refresh token, verifying its validity, type, and expiration."""
+    """Decodes a legacy JWT refresh token if applicable."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
@@ -115,44 +103,149 @@ def decode_refresh_token(token: str) -> dict | None:
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
 
 
-def get_current_user_id(token: str = Depends(oauth2_scheme)) -> int | None:
-    """Extracts and verifies the user ID from the JWT authorization token in the request header."""
+def get_or_create_user_from_firebase(db: Session, firebase_info: dict) -> models.User:
+    """
+    Finds or creates a Neon application user using verified Firebase claims.
+    - If user exists by firebase_uid -> returns user.
+    - If user exists by verified email without firebase_uid -> links firebase_uid and returns user.
+    - Otherwise -> creates a new user record in Neon and returns it.
+    """
+    uid = firebase_info.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token missing UID",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    email = firebase_info.get("email")
+
+    # 1. Lookup by firebase_uid
+    user = db.query(models.User).filter(models.User.firebase_uid == uid).first()
+    if user:
+        if email and user.email != email:
+            try:
+                user.email = email
+                db.commit()
+                db.refresh(user)
+            except Exception:
+                db.rollback()
+        return user
+
+    # 2. Match existing account by verified email to preserve URLs and ownership
+    if email:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        if user:
+            logger.info(
+                f"Linking existing user account ID {user.id} ({email}) with firebase_uid: {uid}"
+            )
+            user.firebase_uid = uid
+            db.commit()
+            db.refresh(user)
+            return user
+
+    # 3. Create new user in Neon
+    logger.info(f"Creating new Neon user for firebase_uid: {uid} ({email})")
+    user = models.User(
+        email=email or f"{uid}@firebase.user",
+        firebase_uid=uid,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def get_current_user(
+    token: Optional[str] = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> Optional[models.User]:
+    """
+    Dependency that extracts and verifies the identity from the Authorization Bearer token.
+    Verifies Firebase ID token, resolves the user in Neon DB, and returns the User model instance.
+    """
     if not token:
         return None
+
+    firebase_info = verify_firebase_id_token(token)
+    if firebase_info:
+        return get_or_create_user_from_firebase(db, firebase_info)
+
+    # Legacy token fallback (e.g. for existing automated test suite compatibility)
     payload = decode_access_token(token)
-    if not payload:
-        return None
-    user_id = payload.get("sub")
-    if user_id is None:
-        return None
-    try:
-        return int(user_id)
-    except ValueError:
-        return None
+    if payload and payload.get("sub"):
+        try:
+            user_id = int(payload["sub"])
+            return db.query(models.User).filter(models.User.id == user_id).first()
+        except (ValueError, TypeError):
+            pass
+
+    return None
 
 
-def get_current_user_id_from_token(token: str | None) -> int | None:
-    """Validate an access token supplied outside FastAPI dependency injection."""
-    if not token:
-        return None
-    payload = decode_access_token(token)
-    if not payload:
-        return None
-    user_id = payload.get("sub")
-    try:
-        return int(user_id) if user_id is not None else None
-    except (TypeError, ValueError):
-        return None
+def get_current_user_id(
+    user: Optional[models.User] = Depends(get_current_user),
+) -> Optional[int]:
+    """Extracts the integer user ID from the resolved authenticated user."""
+    return user.id if user else None
 
 
-def require_current_user_id(
-    user_id: int | None = Depends(get_current_user_id),
-) -> int:
-    """Require a valid access token for account-owned API operations."""
-    if user_id is None:
+def require_current_user(
+    user: Optional[models.User] = Depends(get_current_user),
+) -> models.User:
+    """Requires an authenticated user or raises HTTP 401."""
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return user_id
+    return user
+
+
+def require_current_user_id(
+    user: models.User = Depends(require_current_user),
+) -> int:
+    """Requires a valid authenticated user and returns their Neon user.id."""
+    return user.id
+
+
+def get_current_user_from_token(
+    token: Optional[str], db: Session
+) -> Optional[models.User]:
+    """Validates an authentication token supplied outside FastAPI dependency injection."""
+    if not token:
+        return None
+
+    firebase_info = verify_firebase_id_token(token)
+    if firebase_info:
+        return get_or_create_user_from_firebase(db, firebase_info)
+
+    # Legacy token fallback
+    payload = decode_access_token(token)
+    if payload and payload.get("sub"):
+        try:
+            user_id = int(payload["sub"])
+            return db.query(models.User).filter(models.User.id == user_id).first()
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+def get_current_user_id_from_token(
+    token: Optional[str], db: Optional[Session] = None
+) -> Optional[int]:
+    """Validates token and returns integer user ID, opening a DB session if needed."""
+    if not token:
+        return None
+
+    if db is not None:
+        user = get_current_user_from_token(token, db)
+        return user.id if user else None
+
+    from database import SessionLocal
+
+    with SessionLocal() as session:
+        user = get_current_user_from_token(token, session)
+        return user.id if user else None

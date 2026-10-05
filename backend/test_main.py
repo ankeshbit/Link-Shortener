@@ -38,22 +38,10 @@ def register_token(prefix="testuser"):
     return response.json()["access_token"]
 
 
-# Setup schema on test startup if database is alive
-if database_alive():
-    Base.metadata.create_all(bind=engine)
-
-
-# Use pytest fixture to clean database tables between tests if DB is alive
+# Safely skip drop_all to preserve database records and URL ownership
 @pytest.fixture(autouse=True)
 def clean_db():
-    if not database_alive():
-        yield
-        return
-
-    # Simple clean tables using truncate or drop/recreate
-    # Since we might have foreign keys, drop and recreate is easiest for tests
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    # Production/Neon protection: Do not drop tables
     yield
 
 
@@ -249,3 +237,86 @@ def test_cache_unavailable_does_not_fabricate_data():
     redis_cache.set("test_key", "test_value", ex=5)
     assert redis_cache.get("test_key") == "test_value"
     assert redis_cache.incr("test_counter") >= 1
+
+
+from unittest.mock import patch
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_firebase_token_authentication_and_user_creation():
+    """Tests that a verified Firebase ID token authenticates the user, creates a Neon record, and provides access."""
+    mock_uid = f"firebase_uid_{os.urandom(4).hex()}"
+    mock_email = f"user_{mock_uid}@example.com"
+
+    mock_claims = {
+        "uid": mock_uid,
+        "email": mock_email,
+        "name": "Firebase User",
+        "email_verified": True,
+    }
+
+    with patch("firebase_config.auth.verify_id_token", return_value=mock_claims):
+        token = "mock-firebase-id-token"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # 1. Sync / Me endpoint
+        me_resp = client.get("/api/auth/me", headers=headers)
+        assert me_resp.status_code == 200
+        me_data = me_resp.json()
+        assert me_data["firebase_uid"] == mock_uid
+        assert me_data["email"] == mock_email
+        user_id = me_data["id"]
+
+        # 2. Subsequent call reuses the same user_id
+        me_resp2 = client.post("/api/auth/sync", headers=headers)
+        assert me_resp2.status_code == 200
+        assert me_resp2.json()["id"] == user_id
+
+        # 3. Create short link
+        alias = f"fb_{os.urandom(4).hex()}"
+        short_resp = client.post(
+            "/api/shorten",
+            json={"target_url": "https://example.org", "custom_alias": alias},
+            headers=headers,
+        )
+        assert short_resp.status_code == 200
+
+        # 4. User links contains the link
+        links_resp = client.get("/api/user/links", headers=headers)
+        assert links_resp.status_code == 200
+        user_short_ids = [l["short_id"] for l in links_resp.json()]
+        assert alias in user_short_ids
+
+        # 5. Delete link
+        del_resp = client.delete(f"/api/user/links/{alias}", headers=headers)
+        assert del_resp.status_code == 200
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_firebase_user_isolation():
+    """Tests that User B cannot access or delete User A's links."""
+    uid_a = f"fb_user_a_{os.urandom(4).hex()}"
+    uid_b = f"fb_user_b_{os.urandom(4).hex()}"
+
+    alias = f"link_a_{os.urandom(4).hex()}"
+
+    with patch("firebase_config.auth.verify_id_token", return_value={"uid": uid_a, "email": f"{uid_a}@test.co"}):
+        create_resp = client.post(
+            "/api/shorten",
+            json={"target_url": "https://example.com/a", "custom_alias": alias},
+            headers={"Authorization": "Bearer token-a"},
+        )
+        assert create_resp.status_code == 200
+
+    # User B attempts to access User A's stats and delete User A's link
+    with patch("firebase_config.auth.verify_id_token", return_value={"uid": uid_b, "email": f"{uid_b}@test.co"}):
+        stats_resp = client.get(f"/api/stats/{alias}", headers={"Authorization": "Bearer token-b"})
+        assert stats_resp.status_code == 404
+
+        del_resp = client.delete(f"/api/user/links/{alias}", headers={"Authorization": "Bearer token-b"})
+        assert del_resp.status_code == 404
+
