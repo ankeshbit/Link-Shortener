@@ -42,7 +42,7 @@ analytics data by the authenticated user's `user_id`.
 | **Advanced Shortening Options** | Custom aliases, link expiry timers, bcrypt-encrypted password protection |
 | **QR Code Generator** | Built-in canvas-rendered QR codes with PNG download |
 | **Caching & Rate Limiting** | High-speed Redis-backed caching with graceful in-memory fallback |
-| **Dynamic CORS Wildcards** | All `*.vercel.app` preview deployments automatically allowed via regex origin matching |
+| **Explicit CORS Configuration** | Browser origins are configured through the backend environment |
 | **Professional API Landing** | Async `/` route returning health and endpoint metadata instead of a 404 |
 | **Robust Validation Errors** | Frontend formats FastAPI list-based validation errors into human-readable strings |
 | **Direct bcrypt Hashing** | Removed deprecated `passlib` wrapper; uses `bcrypt` directly for full Python 3.11+ compatibility |
@@ -102,7 +102,7 @@ Link-Shortener/
 │   └── package.json            # Frontend dependencies
 ├── pyproject.toml              # Black & Isort profile compatibility config
 ├── docker-compose.yml          # Local multi-container orchestration
-├── render.yaml                 # Render infrastructure blueprint
+├── render.yaml                 # Render Web Service blueprint (Neon remains external)
 └── README.md
 ```
 
@@ -149,7 +149,7 @@ PUBLIC_BASE_URL=http://localhost:8000
 # Neon PostgreSQL connection string (backend only)
 DATABASE_URL=postgresql://USER:PASSWORD@EP-example-pooler.us-east-2.aws.neon.tech/DATABASE?sslmode=require
 
-# Redis connection string — use rediss:// for TLS (required for Upstash)
+# Optional Redis connection string — use rediss:// for TLS
 REDIS_URL=rediss://default:password@host:6379
 
 # JWT signing secret (generate a strong random key in production)
@@ -163,8 +163,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES=60
 REFRESH_TOKEN_EXPIRE_DAYS=7
 
 # Allowed frontend origin(s) — comma-separated for multiple origins
-# Note: all *.vercel.app origins are automatically allowed via regex regardless of this value
-FRONTEND_URL=http://localhost:5173
+# Exact browser origin(s), comma-separated
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
 # Application environment
 ENV=development
@@ -294,25 +294,10 @@ Runs 10 tests covering:
 
 ## CORS Configuration
 
-The backend is configured to accept requests from:
-
-- `http://localhost:5173` — local Vite dev server
-- `http://127.0.0.1:5173` — alternative localhost
-- Any URL matching `https://*.vercel.app` — all Vercel deployments (production + previews)
-- Any comma-separated URL set in the `FRONTEND_URL` environment variable
-
-```python
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,                        # localhost + FRONTEND_URL list
-    allow_origin_regex=r"https://.*\.vercel\.app",# all Vercel preview URLs
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
-
-> **Why regex?** Vercel generates random subdomains for branch preview deployments (e.g. `project-git-feature-xyz-team.vercel.app`). A static `allow_origins` list cannot cover these. The regex pattern matches any secure Vercel subdomain dynamically.
+In development, the backend allows the local Vite origins. In production,
+`CORS_ALLOWED_ORIGINS` is required and must contain the exact deployed frontend
+origin(s), comma-separated. Wildcard origins are not used because authenticated
+browser requests use credentials.
 
 ---
 
@@ -330,19 +315,32 @@ The backend reads DATABASE_URL from backend/.env; only Redis runs as a local con
 
 ## Cloud Deployment
 
-### Render (Backend + Redis)
+### Render Web Service
 
-1. Connect your GitHub repository to Render.
-2. Apply the `render.yaml` blueprint — it automatically provisions:
-   - **Web Service:** FastAPI (Python 3.11)
-   - **Redis Instance:** Internal TLS connection
-   - **Neon PostgreSQL:** Set `DATABASE_URL` as a protected environment variable
-3. In the Render dashboard, set the following environment variables manually:
-   - `JWT_SECRET` → a strong secret stored only in Render
-   - `FRONTEND_URL` → your Vercel deployment URL (e.g. `https://bytelink.vercel.app`)
-   - `PUBLIC_BASE_URL` → your Render web service HTTPS URL (for example, `https://link-shortener-backend.onrender.com`). This is the URL encoded into generated QR codes.
-4. Run `alembic upgrade head` from the backend directory as a one-off migration step against Neon before the first production deploy, or run it from a protected deployment job.
-5. Trigger a manual deploy or push to `main`.
+The `render.yaml` blueprint provisions only the backend web service. Neon
+PostgreSQL remains the only production database; Redis is optional.
+
+| Setting | Value |
+|---|---|
+| Root Directory | `backend` |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `uvicorn main:app --host 0.0.0.0 --port $PORT` |
+| Health Check Path | `/health` |
+
+Set these environment variables in Render:
+
+- `DATABASE_URL` — Neon PostgreSQL URL with `sslmode=require`
+- `JWT_SECRET` — a strong secret stored only in Render
+- `PUBLIC_BASE_URL` — the deployed Render HTTPS backend URL used by short URLs and QR codes
+- `CORS_ALLOWED_ORIGINS` — exact deployed frontend origin(s), comma-separated
+- `ALGORITHM=HS256`
+- `ACCESS_TOKEN_EXPIRE_MINUTES=60`
+- `REFRESH_TOKEN_EXPIRE_DAYS=7`
+- `ENV=production`
+
+Run `alembic upgrade head` once from a protected environment with the same
+`DATABASE_URL` before serving production traffic. Do not run destructive schema
+commands against production.
 
 ### Vercel (Frontend)
 
@@ -359,5 +357,5 @@ The backend reads DATABASE_URL from backend/.env; only Redis runs as a local con
 - JWT tokens are signed with `HS256` using the backend-only `JWT_SECRET` environment variable.
 - Passwords are hashed using `bcrypt` directly (no deprecated wrapper libraries).
 - Link passwords use SHA-256 before bcrypt to avoid bcrypt's 72-byte input limit.
-- Redis connection uses TLS (`rediss://`) in production via Upstash.
+- Redis is optional; if used in production, configure a TLS (`rediss://`) URL.
 - Rate limiting is enforced per-IP via Redis counters.

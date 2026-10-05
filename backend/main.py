@@ -189,7 +189,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 # Configure CORS Origins
-FRONTEND_URL = os.getenv("FRONTEND_URL")
 ENVIRONMENT = os.getenv("ENV", "development").strip().lower()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 if not PUBLIC_BASE_URL and ENVIRONMENT != "production":
@@ -207,18 +206,22 @@ if ENVIRONMENT == "production" and parsed_public_url.scheme != "https":
 
 # Build the list of allowed origins. Local origins are development-only.
 origins = []
-if os.getenv("ENV", "development") != "production":
+if ENVIRONMENT != "production":
     origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
-if FRONTEND_URL:
-    for url in FRONTEND_URL.split(","):
-        trimmed = url.strip()
-        if trimmed and trimmed not in origins:
-            origins.append(trimmed)
+
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
+if ENVIRONMENT == "production" and not CORS_ALLOWED_ORIGINS.strip():
+    raise RuntimeError(
+        "CORS_ALLOWED_ORIGINS environment variable is required in production."
+    )
+for url in CORS_ALLOWED_ORIGINS.split(","):
+    trimmed = url.strip().rstrip("/")
+    if trimmed and trimmed not in origins:
+        origins.append(trimmed)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

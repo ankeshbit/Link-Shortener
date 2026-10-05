@@ -36,7 +36,10 @@ const AnalyticsDashboard = () => {
     const connectWS = () => {
       if (!isMounted) return;
 
-      const apiURL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+      const apiURL = (
+        import.meta.env.VITE_API_URL
+        || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin)
+      ).replace(/\/$/, '');
       // Convert http:// to ws:// and https:// to wss://
       const token = encodeURIComponent(localStorage.getItem('token') || '');
       const wsURL = apiURL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${token}`;
