@@ -1,6 +1,6 @@
 # ByteLink — Premium Full-Stack URL Shortener & Live Analytics
 
-ByteLink is a production-grade, full-stack URL Shortener application built with modern web technologies. It provides instantaneous link redirections, custom alias creations, password lock protections, user authentication dashboards, and real-time geographical analytics streaming via WebSockets.
+ByteLink is a production-grade, full-stack URL Shortener application built with modern web technologies. It provides instantaneous link redirections, custom alias creations, password lock protections, user authentication dashboards, and real-time geographical analytics streaming via WebSockets.m
 
 ## Database: Neon PostgreSQL
 
