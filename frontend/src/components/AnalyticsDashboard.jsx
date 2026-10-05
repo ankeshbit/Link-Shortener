@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import api from '../api/axios';
+import api, { API_BASE_URL } from '../api/axios';
 import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { ArrowLeft, MapPin, Clock } from 'lucide-react';
@@ -36,13 +36,9 @@ const AnalyticsDashboard = () => {
     const connectWS = () => {
       if (!isMounted) return;
 
-      const apiURL = (
-        import.meta.env.VITE_API_URL
-        || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin)
-      ).replace(/\/$/, '');
       // Convert http:// to ws:// and https:// to wss://
       const token = encodeURIComponent(localStorage.getItem('token') || '');
-      const wsURL = apiURL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${token}`;
+      const wsURL = API_BASE_URL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${token}`;
 
       try {
         ws = new WebSocket(wsURL);

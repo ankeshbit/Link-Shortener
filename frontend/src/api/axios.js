@@ -1,12 +1,16 @@
 import axios from 'axios';
 
-const apiURL = (
-  import.meta.env.VITE_API_URL
-  || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin)
+const configuredApiURL = import.meta.env.VITE_API_URL?.trim();
+export const API_BASE_URL = (
+  configuredApiURL || (import.meta.env.DEV ? 'http://localhost:8000' : '')
 ).replace(/\/$/, '');
 
+if (!API_BASE_URL) {
+  throw new Error('VITE_API_URL must be configured for production builds.');
+}
+
 const api = axios.create({
-  baseURL: apiURL,
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -35,7 +39,7 @@ api.interceptors.response.use(
     ) {
       originalRequest._retry = true;
       try {
-        const res = await axios.post(`${apiURL}/api/auth/refresh`, {
+        const res = await axios.post(`${API_BASE_URL}/api/auth/refresh`, {
           refresh_token: localStorage.getItem('refreshToken'),
         });
         const { access_token, refresh_token: newRefreshToken } = res.data;
