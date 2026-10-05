@@ -320,3 +320,50 @@ def test_firebase_user_isolation():
         del_resp = client.delete(f"/api/user/links/{alias}", headers={"Authorization": "Bearer token-b"})
         assert del_resp.status_code == 404
 
+
+def test_firebase_admin_individual_env_initialization():
+    """Verifies that Firebase Admin correctly unescapes newlines and uses individual env vars."""
+    import firebase_config
+
+    mock_project_id = "test-project-123"
+    mock_email = "test-sa@test-project-123.iam.gserviceaccount.com"
+    mock_raw_key = "-----BEGIN PRIVATE KEY-----\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASC\\n-----END PRIVATE KEY-----\\n"
+
+    with patch.dict(os.environ, {
+        "FIREBASE_PROJECT_ID": mock_project_id,
+        "FIREBASE_CLIENT_EMAIL": mock_email,
+        "FIREBASE_PRIVATE_KEY": mock_raw_key,
+        "FIREBASE_SERVICE_ACCOUNT_JSON": "",
+        "FIREBASE_CREDENTIALS_PATH": "",
+    }, clear=False), \
+    patch("firebase_config._firebase_initialized", False), \
+    patch("firebase_admin._apps", {}), \
+    patch("firebase_admin.credentials.Certificate") as mock_cert, \
+    patch("firebase_admin.initialize_app") as mock_init:
+        res = firebase_config.initialize_firebase()
+        assert res is True
+        mock_init.assert_called_once()
+        cert_arg = mock_cert.call_args[0][0]
+        assert cert_arg["project_id"] == mock_project_id
+        assert cert_arg["client_email"] == mock_email
+        assert "\\n" not in cert_arg["private_key"]
+        assert "\n" in cert_arg["private_key"]
+
+
+def test_firebase_invalid_or_missing_token_401():
+    """Verifies that invalid or missing Firebase tokens safely return 401 without revealing internal details."""
+    # 1. Missing token
+    res_no_auth = client.post("/api/shorten", json={"target_url": "https://example.com"})
+    assert res_no_auth.status_code == 401
+    assert res_no_auth.json()["message"] == "Authentication required"
+
+    # 2. Invalid token
+    with patch("firebase_config.auth.verify_id_token", side_effect=Exception("Invalid signature")):
+        res_invalid = client.post(
+            "/api/shorten",
+            json={"target_url": "https://example.com"},
+            headers={"Authorization": "Bearer totally-invalid-token"},
+        )
+        assert res_invalid.status_code == 401
+        assert res_invalid.json()["message"] == "Authentication required"
+
