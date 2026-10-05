@@ -149,7 +149,7 @@ PUBLIC_BASE_URL=http://localhost:8000
 # Neon PostgreSQL connection string (backend only)
 DATABASE_URL=postgresql://USER:PASSWORD@EP-example-pooler.us-east-2.aws.neon.tech/DATABASE?sslmode=require
 
-# Optional Redis connection string — use rediss:// for TLS
+# Redis connection string. Use redis:// locally and rediss:// for managed TLS Redis.
 REDIS_URL=rediss://default:password@host:6379
 
 # JWT signing secret (generate a strong random key in production)
@@ -318,7 +318,8 @@ The backend reads DATABASE_URL from backend/.env; only Redis runs as a local con
 ### Render Web Service
 
 The `render.yaml` blueprint provisions only the backend web service. Neon
-PostgreSQL remains the only production database; Redis is optional.
+PostgreSQL remains the only production database. Redis is an external
+cache/rate-limit service and must be configured separately.
 
 | Setting | Value |
 |---|---|
@@ -330,6 +331,8 @@ PostgreSQL remains the only production database; Redis is optional.
 Set these environment variables in Render:
 
 - `DATABASE_URL` — Neon PostgreSQL URL with `sslmode=require`
+- `REDIS_URL` — external Redis provider URL (`redis://` or preferably `rediss://`
+  for TLS). Do not set this to `localhost` or `redis://redis:6379/0` on Render.
 - `JWT_SECRET` — a strong secret stored only in Render
 - `PUBLIC_BASE_URL` — the deployed Render HTTPS backend URL used by short URLs and QR codes
 - `CORS_ALLOWED_ORIGINS` — exact deployed frontend origin(s), comma-separated
@@ -357,5 +360,7 @@ commands against production.
 - JWT tokens are signed with `HS256` using the backend-only `JWT_SECRET` environment variable.
 - Passwords are hashed using `bcrypt` directly (no deprecated wrapper libraries).
 - Link passwords use SHA-256 before bcrypt to avoid bcrypt's 72-byte input limit.
-- Redis is optional; if used in production, configure a TLS (`rediss://`) URL.
+- The application remains available in degraded mode if Redis is temporarily
+  unavailable, but caching and distributed rate limiting require a reachable
+  external Redis service.
 - Rate limiting is enforced per-IP via Redis counters.
