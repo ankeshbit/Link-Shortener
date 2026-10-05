@@ -208,16 +208,12 @@ if parsed_public_url.scheme not in {"http", "https"} or not parsed_public_url.ne
 if ENVIRONMENT == "production" and parsed_public_url.scheme != "https":
     raise RuntimeError("PUBLIC_BASE_URL must use HTTPS in production.")
 
-# Build the list of allowed origins. Local origins are development-only.
-origins = []
+# Build the list of allowed origins.
+origins = ["https://link-shortener-mauve-pi.vercel.app"]
 if ENVIRONMENT != "production":
     origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
 
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
-if ENVIRONMENT == "production" and not CORS_ALLOWED_ORIGINS.strip():
-    raise RuntimeError(
-        "CORS_ALLOWED_ORIGINS environment variable is required in production."
-    )
 for url in CORS_ALLOWED_ORIGINS.split(","):
     trimmed = url.strip().rstrip("/")
     if trimmed and trimmed not in origins:
@@ -226,6 +222,7 @@ for url in CORS_ALLOWED_ORIGINS.split(","):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
