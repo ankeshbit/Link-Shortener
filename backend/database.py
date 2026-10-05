@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
@@ -13,13 +14,23 @@ if not DATABASE_URL:
         "Configure it with the Neon PostgreSQL connection string."
     )
 
+def normalize_database_url(database_url: str) -> str:
+    """Use the installed psycopg2 driver for every PostgreSQL URL."""
+    url = make_url(database_url)
+    if url.get_backend_name() != "postgresql":
+        raise RuntimeError(
+            f"Invalid DATABASE_URL schema: '{database_url}'. "
+            "PostgreSQL is required."
+        )
+    return url.set(drivername="postgresql+psycopg2").render_as_string(
+        hide_password=False
+    )
+
+
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-if not DATABASE_URL.startswith("postgresql"):
-    raise RuntimeError(
-        f"Invalid DATABASE_URL schema: '{DATABASE_URL}'. PostgreSQL is required."
-    )
+DATABASE_URL = normalize_database_url(DATABASE_URL)
 
 engine = create_engine(
     DATABASE_URL,
