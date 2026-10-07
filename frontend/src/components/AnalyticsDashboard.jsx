@@ -49,8 +49,9 @@ const AnalyticsDashboard = () => {
         token = localStorage.getItem('token') || '';
       }
 
-      // Convert http:// to ws:// and https:// to wss://
-      const wsURL = API_BASE_URL.replace(/^http/, 'ws') + `/api/ws/stats/${id}?token=${encodeURIComponent(token)}`;
+      const apiURL = new URL(API_BASE_URL);
+      apiURL.protocol = apiURL.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsURL = `${apiURL.origin}/api/ws/stats/${id}?token=${encodeURIComponent(token)}`;
 
       try {
         ws = new WebSocket(wsURL);

@@ -212,6 +212,9 @@ if ENVIRONMENT == "production" and parsed_public_url.scheme != "https":
 origins = ["https://link-shortener-mauve-pi.vercel.app"]
 if ENVIRONMENT != "production":
     origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
+    if parsed_public_url.hostname:
+        origins.append(f"http://{parsed_public_url.hostname}:5173")
+    origins.append(PUBLIC_BASE_URL)
 
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
 for url in CORS_ALLOWED_ORIGINS.split(","):
@@ -309,8 +312,16 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def get_client_ip(request: Request) -> str:
+    """Return the original client address when a trusted proxy supplies it."""
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 def rate_limit(request: Request):
-    client_ip = request.client.host
+    client_ip = get_client_ip(request)
     key = f"rate_limit:{client_ip}"
     try:
         current = redis_cache.incr(key)
@@ -761,7 +772,7 @@ def redirect_url(
         return HTMLResponse(get_html_template("Password Required", form))
 
     user_agent = request.headers.get("user-agent", "Unknown")
-    ip = request.client.host
+    ip = get_client_ip(request)
     background_tasks.add_task(track_click, short_id, user_agent, ip)
 
     return RedirectResponse(url=target_url)

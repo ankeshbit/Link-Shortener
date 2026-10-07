@@ -2,9 +2,22 @@ import axios from 'axios';
 import { auth } from '../auth/firebase';
 
 const configuredApiURL = import.meta.env.VITE_API_URL?.trim();
-export const API_BASE_URL = (
-  configuredApiURL || (import.meta.env.DEV ? 'http://localhost:8000' : '')
-).replace(/\/$/, '');
+const defaultApiURL = import.meta.env.DEV
+  ? `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8000`
+  : '';
+const localApiURL = configuredApiURL || defaultApiURL;
+const apiURL = new URL(localApiURL || 'http://localhost:8000');
+if (
+  import.meta.env.DEV &&
+  (apiURL.hostname === 'localhost' || apiURL.hostname === '127.0.0.1') &&
+  typeof window !== 'undefined'
+) {
+  apiURL.hostname = window.location.hostname;
+}
+
+export const API_BASE_URL = (configuredApiURL || defaultApiURL)
+  ? apiURL.origin.replace(/\/$/, '')
+  : '';
 
 if (!API_BASE_URL) {
   throw new Error('VITE_API_URL must be configured for production builds.');
