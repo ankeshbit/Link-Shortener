@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../api/axios';
 import { 
-  BarChart2, Trash2, ExternalLink, Link as LinkIcon, Plus, 
+  BarChart2, Trash2, Link as LinkIcon, Plus, 
   TrendingUp, Clock, Copy, Check 
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';

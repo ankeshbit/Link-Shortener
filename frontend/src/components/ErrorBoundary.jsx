@@ -1,6 +1,6 @@
-import React from 'react';
+import { Component } from 'react';
 
-class ErrorBoundary extends React.Component {
+class ErrorBoundary extends Component {
   constructor(props) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -11,7 +11,7 @@ class ErrorBoundary extends React.Component {
   }
 
   componentDidCatch(error, errorInfo) {
-    console.error("ErrorBoundary caught an error:", error, errorInfo);
+    console.error('Frontend ErrorBoundary caught an error:', error, errorInfo);
   }
 
   render() {
@@ -32,7 +32,7 @@ class ErrorBoundary extends React.Component {
         }}>
           <h1 style={{ color: '#ef4444', marginBottom: '1rem', fontSize: '2.5rem' }}>Something went wrong</h1>
           <p style={{ color: '#94a3b8', marginBottom: '2.5rem', fontSize: '1.1rem', maxWidth: '500px', lineHeight: '1.6' }}>
-            We've encountered an unexpected frontend error. Please try refreshing the page or contact support if the issue persists.
+            We&apos;ve encountered an unexpected frontend error. Please try refreshing the page or contact support if the issue persists.
           </p>
           <button
             onClick={() => window.location.reload()}

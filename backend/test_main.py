@@ -1483,3 +1483,27 @@ def test_section3_starlette_404_and_405_return_standard_shape():
     data_405 = res_405.json()
     assert data_405.get("status") == "error"
     assert "message" in data_405
+
+
+def test_section4_account_password_100_characters():
+    """Asserts that a 100-character account password hashes and verifies without 500 error or 72-byte truncation."""
+    import main
+    import security
+
+    pwd_100 = "P@ssw0rd_" + "x" * 83 + "_End!123"
+    assert len(pwd_100) == 100
+
+    hashed = security.get_password_hash(pwd_100)
+    assert hashed.startswith("$2b$")
+    assert security.verify_password(pwd_100, hashed) is True
+    assert security.verify_password(pwd_100 + "diff", hashed) is False
+
+    # Also test registration with 100-character password when ENABLE_LEGACY_AUTH is enabled
+    with patch.object(main, "ENABLE_LEGACY_AUTH", True):
+        email = f"user100_{os.urandom(4).hex()}@bytelink.co"
+        res = client.post(
+            "/api/auth/register",
+            json={"email": email, "password": pwd_100},
+        )
+        assert res.status_code == 201
+        assert "access_token" in res.json()

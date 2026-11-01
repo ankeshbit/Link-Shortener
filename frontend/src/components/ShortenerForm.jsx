@@ -457,8 +457,8 @@ const ShortenerForm = () => {
           <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '24px', padding: '32px', display: 'flex', flexDirection: 'column', gap: '16px', boxShadow: 'var(--shadow)' }}>
             <h4 style={{ fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)' }}>Redirect Speed</h4>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px' }}>
-              <span style={{ fontSize: '48px', fontWeight: '800', color: 'var(--accent)' }}>&lt; 12ms</span>
-              <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Avg latency</span>
+              <span style={{ fontSize: '36px', fontWeight: '800', color: 'var(--accent)' }}>Instant</span>
+              <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Cached Resolution</span>
             </div>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
               Built with PostgreSQL and Redis caching for high-throughput, low-latency URL resolution.
@@ -470,54 +470,56 @@ const ShortenerForm = () => {
       {/* Pricing Grid Section */}
       <section className="pricing-section" id="pricing">
         <div className="pricing-header">
-          <h2>Simple, developer-friendly pricing.</h2>
-          <p>Start for free and scale as you grow.</p>
+          <h2>Simple, developer-friendly tiers.</h2>
+          <p>Full-featured link shortening and live analytics.</p>
         </div>
         <div className="pricing-grid">
           <div className="pricing-card">
-            <div className="pricing-tier">Hobby</div>
+            <div className="pricing-tier">Open Source</div>
             <div className="pricing-price">
               <span className="pricing-amount">$0</span>
-              <span className="pricing-period">/ month</span>
+              <span className="pricing-period">/ free</span>
             </div>
-            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>For personal side projects and testing.</p>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Full access to all URL shortener capabilities.</p>
             <ul className="pricing-features-list">
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>100 links / month</span>
+                <Check size={16} aria-hidden="true" /> <span>Unlimited short links</span>
               </li>
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>Basic analytics logs</span>
-              </li>
-              <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>QR Code generator</span>
-              </li>
-            </ul>
-            <a href="#hero-input" className="btn-pricing-action" aria-label="Get started for free on Hobby plan">Get Started</a>
-          </div>
-
-          <div className="pricing-card popular">
-            <div className="pricing-badge">Popular</div>
-            <div className="pricing-tier">Pro</div>
-            <div className="pricing-price">
-              <span className="pricing-amount">$9</span>
-              <span className="pricing-period">/ month</span>
-            </div>
-            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>For growing products and marketing campaigns.</p>
-            <ul className="pricing-features-list">
-              <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>Unlimited links</span>
-              </li>
-              <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>Detailed geo-location analytics</span>
+                <Check size={16} aria-hidden="true" /> <span>Real-time analytics logs</span>
               </li>
               <li className="pricing-feature-item">
                 <Check size={16} aria-hidden="true" /> <span>Custom vanity aliases</span>
               </li>
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>Password link protection</span>
+                <Check size={16} aria-hidden="true" /> <span>Password protection & QR code</span>
               </li>
             </ul>
-            <a href="#hero-input" className="btn-pricing-action primary-pricing" aria-label="Upgrade to Pro plan for 9 dollars a month">Upgrade to Pro</a>
+            <a href="#hero-input" className="btn-pricing-action" aria-label="Get started for free">Get Started</a>
+          </div>
+
+          <div className="pricing-card popular">
+            <div className="pricing-badge">Cloud</div>
+            <div className="pricing-tier">Team</div>
+            <div className="pricing-price">
+              <span className="pricing-amount">Hosted</span>
+            </div>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Multi-region deployment and dedicated infrastructure.</p>
+            <ul className="pricing-features-list">
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Managed PostgreSQL & Redis</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Detailed geo-location analytics</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>Custom vanity domains</span>
+              </li>
+              <li className="pricing-feature-item">
+                <Check size={16} aria-hidden="true" /> <span>High-availability redirects</span>
+              </li>
+            </ul>
+            <a href="#hero-input" className="btn-pricing-action primary-pricing" aria-label="Deploy ByteLink">Deploy Now</a>
           </div>
 
           <div className="pricing-card">

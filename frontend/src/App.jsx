@@ -7,7 +7,7 @@ import Dashboard from './components/Dashboard';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { MagnetLines } from './components/MagnetLines';
-import { API_BASE_URL } from './api/axios';
+import { API_BASE_URL, configError } from './api/axios';
 
 function AppContent() {
   const location = useLocation();
@@ -106,6 +106,25 @@ function AppContent() {
     signOut();
     navigate('/login');
   };
+
+  if (configError) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        padding: '2rem',
+        textAlign: 'center',
+        background: '#070B14',
+        color: '#f87171'
+      }}>
+        <h1 style={{ fontSize: '24px', marginBottom: '1rem' }}>Configuration Error</h1>
+        <p style={{ color: '#9ca3af', maxWidth: '500px', lineHeight: '1.6' }}>{configError}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="app-container">
