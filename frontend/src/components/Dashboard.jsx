@@ -3,9 +3,10 @@ import { useNavigate, Link } from 'react-router-dom';
 import api from '../api/axios';
 import { 
   BarChart2, Trash2, ExternalLink, Link as LinkIcon, Plus, 
-  TrendingUp, Clock, Copy, Check, LogOut 
+  TrendingUp, Clock, Copy, Check 
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { copyText } from '../utils/clipboard';
 
 const Dashboard = () => {
   const [links, setLinks] = useState([]);
@@ -15,11 +16,15 @@ const Dashboard = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
+    let isMounted = true;
     const fetchUserLinks = async () => {
       try {
         const res = await api.get('/api/user/links');
-        setLinks(res.data);
+        if (isMounted) {
+          setLinks(res.data);
+        }
       } catch (err) {
+        if (!isMounted) return;
         if (err.response?.status === 401) {
           localStorage.removeItem('token');
           navigate('/login');
@@ -27,30 +32,37 @@ const Dashboard = () => {
           setError('Failed to load your shortened URLs. Please try again.');
         }
       } finally {
-        setLoading(false);
+        if (isMounted) {
+          setLoading(false);
+        }
       }
     };
 
     fetchUserLinks();
+    return () => {
+      isMounted = false;
+    };
   }, [navigate]);
 
   const handleDelete = async (shortId) => {
     if (!window.confirm('Are you sure you want to delete this short URL?')) return;
     try {
       await api.delete(`/api/user/links/${shortId}`);
-      setLinks(links.filter((link) => link.short_id !== shortId));
+      setLinks((prev) => prev.filter((link) => link.short_id !== shortId));
     } catch {
       alert('Failed to delete the link. Please try again.');
     }
   };
 
-  const handleCopy = (shortUrl, shortId) => {
-    navigator.clipboard.writeText(shortUrl);
-    setCopiedId(shortId);
-    setTimeout(() => setCopiedId(null), 2000);
+  const handleCopy = async (shortUrl, shortId) => {
+    const ok = await copyText(shortUrl);
+    if (ok) {
+      setCopiedId(shortId);
+      setTimeout(() => setCopiedId(null), 2000);
+    }
   };
 
-  const totalClicks = links.reduce((sum, link) => sum + link.clicks_count, 0);
+  const totalClicks = links.reduce((sum, link) => sum + (link.clicks_count || 0), 0);
 
   if (loading) {
     return (
@@ -134,6 +146,7 @@ const Dashboard = () => {
                           onClick={() => handleCopy(link.short_url, link.id)}
                           style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: '2px' }}
                           title="Copy Link"
+                          aria-label="Copy short link"
                         >
                           {copiedId === link.id ? <Check size={14} color="var(--accent)" /> : <Copy size={14} />}
                         </button>

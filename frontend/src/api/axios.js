@@ -2,27 +2,15 @@ import axios from 'axios';
 import { auth } from '../auth/firebase';
 
 const configuredApiURL = import.meta.env.VITE_API_URL?.trim();
-const defaultApiURL = `http://${typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost'}:8000`;
-const rawApiURL = configuredApiURL || defaultApiURL;
 
-let resolvedURL;
-try {
-  resolvedURL = new URL(rawApiURL);
-} catch {
-  resolvedURL = new URL('http://localhost:8000');
+let API_BASE_URL = 'http://localhost:8000';
+if (configuredApiURL) {
+  API_BASE_URL = configuredApiURL.replace(/\/$/, '');
+} else if (typeof window !== 'undefined' && window.location.hostname) {
+  API_BASE_URL = `http://${window.location.hostname}:8000`;
 }
 
-// In local browser development, keep the port while mirroring window hostname if on localhost
-if (
-  import.meta.env.DEV &&
-  (resolvedURL.hostname === 'localhost' || resolvedURL.hostname === '127.0.0.1') &&
-  typeof window !== 'undefined' &&
-  window.location.hostname
-) {
-  resolvedURL.hostname = window.location.hostname;
-}
-
-export const API_BASE_URL = resolvedURL.origin.replace(/\/$/, '');
+export { API_BASE_URL };
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -31,7 +19,7 @@ const api = axios.create({
   },
 });
 
-// Request interceptor: Attach fresh Firebase ID token
+// Request interceptor: Attach fresh Firebase ID token if available
 api.interceptors.request.use(
   async (config) => {
     try {
@@ -54,7 +42,7 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response interceptor: Auto-refresh Firebase ID token on 401
+// Response interceptor: Refresh token once on 401 for authenticated requests without redirect loops
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -72,9 +60,7 @@ api.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${freshToken}`;
         return api(originalRequest);
       } catch (refreshError) {
-        localStorage.removeItem('token');
-        window.dispatchEvent(new Event('authchange'));
-        return Promise.reject(refreshError);
+        console.warn('Automatic token refresh failed:', refreshError);
       }
     }
     return Promise.reject(error);

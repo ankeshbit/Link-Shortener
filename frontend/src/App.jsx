@@ -7,6 +7,7 @@ import Dashboard from './components/Dashboard';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { MagnetLines } from './components/MagnetLines';
+import { API_BASE_URL } from './api/axios';
 
 function AppContent() {
   const location = useLocation();
@@ -201,8 +202,14 @@ function AppContent() {
             >
               GitHub
             </a>
-            <a href="#docs" className="footer-link">Docs</a>
-            <a href="#privacy" className="footer-link">Privacy</a>
+            <a 
+              href={`${API_BASE_URL}/docs`} 
+              target="_blank" 
+              rel="noopener noreferrer" 
+              className="footer-link"
+            >
+              Swagger Docs
+            </a>
           </div>
         </div>
       </footer>

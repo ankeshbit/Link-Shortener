@@ -1,79 +1,100 @@
-import React, { useRef, useEffect } from "react";
-import { motion, useMotionValue, animate } from "motion/react";
+import { useRef, useEffect } from "react";
 
 export function TextRepel({ text, className = "", style = {} }) {
+  const containerRef = useRef(null);
+  const charRefs = useRef([]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (mediaQuery.matches) return;
+
+    let rafId = null;
+    let mouseX = 0;
+    let mouseY = 0;
+
+    const onMouseMove = (e) => {
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+      if (!rafId) {
+        rafId = requestAnimationFrame(updateRepel);
+      }
+    };
+
+    const updateRepel = () => {
+      rafId = null;
+      if (!containerRef.current) return;
+
+      const radius = 90;
+      const strength = 16;
+      const chars = charRefs.current;
+
+      for (let i = 0; i < chars.length; i++) {
+        const el = chars[i];
+        if (!el) continue;
+        const rect = el.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+
+        const dx = centerX - mouseX;
+        const dy = centerY - mouseY;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist < radius) {
+          const force = (radius - dist) / radius;
+          const angle = Math.atan2(dy, dx);
+          const tx = Math.cos(angle) * force * strength;
+          const ty = Math.sin(angle) * force * strength;
+          el.style.transform = `translate(${tx}px, ${ty}px)`;
+        } else {
+          el.style.transform = "translate(0px, 0px)";
+        }
+      }
+    };
+
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, []);
+
   const words = text.split(" ");
+  let globalIndex = 0;
 
   return (
-    <span className={className} style={{ display: "inline-block", ...style }}>
+    <span
+      ref={containerRef}
+      className={className}
+      style={{ display: "inline-block", ...style }}
+    >
       {words.map((word, wordIdx) => (
-        <span key={wordIdx} style={{ display: "inline-block", whiteSpace: "nowrap" }}>
-          {word.split("").map((char, charIdx) => (
-            <RepelChar key={charIdx} char={char} />
-          ))}
-          {/* Add a space after the word, unless it's the last word */}
-          {wordIdx < words.length - 1 && <span style={{ display: "inline-block" }}>&nbsp;</span>}
+        <span
+          key={wordIdx}
+          style={{ display: "inline-block", whiteSpace: "nowrap" }}
+        >
+          {word.split("").map((char) => {
+            const idx = globalIndex++;
+            return (
+              <span
+                key={idx}
+                ref={(el) => (charRefs.current[idx] = el)}
+                style={{
+                  display: "inline-block",
+                  transition: "transform 0.15s ease-out",
+                  willChange: "transform",
+                }}
+              >
+                {char}
+              </span>
+            );
+          })}
+          {wordIdx < words.length - 1 && (
+            <span style={{ display: "inline-block" }}>&nbsp;</span>
+          )}
         </span>
       ))}
     </span>
-  );
-}
-
-function RepelChar({ char }) {
-  const charRef = useRef(null);
-  const x = useMotionValue(0);
-  const y = useMotionValue(0);
-
-  useEffect(() => {
-    const handleMouseMove = (e) => {
-      if (!charRef.current) return;
-
-      const rect = charRef.current.getBoundingClientRect();
-      // Subtract the current translations to get the original un-translated center coordinates
-      const centerX = rect.left + rect.width / 2 - x.get();
-      const centerY = rect.top + rect.height / 2 - y.get();
-
-      const mouseX = e.clientX;
-      const mouseY = e.clientY;
-
-      const dx = centerX - mouseX;
-      const dy = centerY - mouseY;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-
-      const radius = 100; // Radius of influence in pixels
-      const strength = 18; // Maximum repulsion displacement in pixels
-
-      let targetX = 0;
-      let targetY = 0;
-
-      if (distance < radius) {
-        // Linear force decay: stronger repulsion close to the cursor
-        const force = (radius - distance) / radius;
-        const angle = Math.atan2(dy, dx);
-        targetX = Math.cos(angle) * force * strength;
-        targetY = Math.sin(angle) * force * strength;
-      }
-
-      // Performance: do not restart spring animations to 0 if the values are already idle at 0
-      if (targetX === 0 && targetY === 0 && x.get() === 0 && y.get() === 0) {
-        return;
-      }
-
-      // Smoothly animate the motion values with spring physics
-      animate(x, targetX, { type: "spring", damping: 15, stiffness: 150 });
-      animate(y, targetY, { type: "spring", damping: 15, stiffness: 150 });
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    return () => window.removeEventListener("mousemove", handleMouseMove);
-  }, [x, y]);
-
-  return (
-    <motion.span
-      ref={charRef}
-      style={{ display: "inline-block", x, y }}
-    >
-      {char}
-    </motion.span>
   );
 }

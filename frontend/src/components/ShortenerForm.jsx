@@ -1,14 +1,15 @@
 import { useState, useRef } from 'react';
 import api from '../api/axios';
 import { 
-  Copy, Check, BarChart2, Settings, Download, ExternalLink, QrCode, Lock, 
-  ChevronRight, TrendingUp, Laptop, Globe 
+  Copy, Check, BarChart2, Settings, Download, ExternalLink, QrCode, 
+  ChevronRight, TrendingUp 
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { QRCodeCanvas } from 'qrcode.react';
 import { TextRepel } from './TextRepel';
 import AuthPrompt from './AuthPrompt';
 import { useAuth } from '../auth/AuthContext';
+import { copyText } from '../utils/clipboard';
 
 const ShortenerForm = () => {
   const { isAuthenticated } = useAuth();
@@ -42,9 +43,9 @@ const ShortenerForm = () => {
     
     try {
       const payload = { target_url: formattedUrl };
-      if (customAlias) payload.custom_alias = customAlias;
+      if (customAlias.trim()) payload.custom_alias = customAlias.trim();
       if (expiresAt) payload.expires_at = new Date(expiresAt).toISOString();
-      if (password) payload.password = password;
+      if (password.trim()) payload.password = password.trim();
 
       const res = await api.post('/api/shorten', payload);
       setResult(res.data);
@@ -61,7 +62,7 @@ const ShortenerForm = () => {
 
       if (!err.response) {
         if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
-          setError('Network error: Unable to connect to the backend server. Please verify your connection or CORS configuration.');
+          setError('Network error: Unable to connect to backend server. Please verify backend is running on http://localhost:8000.');
         } else {
           setError(err.message || 'Unable to connect to the server. Please check your network connection.');
         }
@@ -88,40 +89,34 @@ const ShortenerForm = () => {
         }
       }
 
-      switch (status) {
-        case 400:
-          setError(serverMessage || 'Bad request. Please verify the URL and input parameters.');
-          break;
-        case 401:
-          setError(serverMessage || 'Authentication required or your session has expired. Please sign in again.');
-          setShowAuthPrompt(true);
-          break;
-        case 403:
-          setError(serverMessage || 'Permission denied. You do not have access to create this link.');
-          break;
-        case 404:
-          setError(serverMessage || 'Shortening service endpoint not found (404). Please verify backend deployment.');
-          break;
-        case 409:
-          setError(serverMessage || 'This custom alias is already in use. Please choose another alias.');
-          break;
-        case 422:
-          setError(serverMessage || 'Invalid URL format. Please enter a valid URL including http:// or https://.');
-          break;
-        case 429:
-          setError(serverMessage || 'Rate limit exceeded: Too many requests. Please slow down and try again shortly.');
-          break;
-        case 500:
-          setError('An internal server error occurred. Please try again in a few moments.');
-          break;
-        case 502:
-        case 503:
-        case 504:
-          setError('The backend server is temporarily unavailable or starting up. Please wait a few seconds and try again.');
-          break;
-        default:
-          setError(serverMessage || `Failed to shorten URL (Error ${status}). Please verify the URL.`);
-          break;
+      if (serverMessage) {
+        setError(serverMessage);
+        if (status === 401) setShowAuthPrompt(true);
+      } else {
+        switch (status) {
+          case 400:
+            setError('Bad request. Please verify the URL and parameters.');
+            break;
+          case 401:
+            setError('Authentication required. Please sign in with Google to shorten links.');
+            setShowAuthPrompt(true);
+            break;
+          case 403:
+            setError('Permission denied. You do not have access to create this link.');
+            break;
+          case 409:
+            setError('This custom alias is already in use. Please choose another alias.');
+            break;
+          case 422:
+            setError('Invalid URL format. Please enter a valid HTTP or HTTPS address.');
+            break;
+          case 429:
+            setError('Too many requests. Rate limit is 20 requests per minute.');
+            break;
+          default:
+            setError('Failed to shorten URL. Make sure it\'s valid.');
+            break;
+        }
       }
     } finally {
       setLoading(false);
@@ -129,28 +124,42 @@ const ShortenerForm = () => {
   };
 
   const downloadQR = () => {
-    const canvas = qrRef.current.querySelector('canvas');
-    if (canvas) {
-      const pngUrl = canvas.toDataURL('image/png').replace('image/png', 'image/octet-stream');
-      const downloadLink = document.createElement('a');
-      downloadLink.href = pngUrl;
-      downloadLink.download = `${result.short_id}-qr.png`;
-      document.body.appendChild(downloadLink);
-      downloadLink.click();
-      document.body.removeChild(downloadLink);
-    }
+    if (!result?.short_url) return;
+    const sourceCanvas = qrRef.current?.querySelector('canvas');
+    if (!sourceCanvas) return;
+
+    const offscreen = document.createElement('canvas');
+    offscreen.width = 512;
+    offscreen.height = 512;
+    const ctx = offscreen.getContext('2d');
+
+    // Fill clean white background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 512, 512);
+
+    // Render QR code with padding (432x432 inside 512x512)
+    ctx.drawImage(sourceCanvas, 40, 40, 432, 432);
+
+    const pngUrl = offscreen.toDataURL('image/png');
+    const downloadLink = document.createElement('a');
+    downloadLink.href = pngUrl;
+    downloadLink.download = `${result.short_id || 'bytelink'}-qr-512px.png`;
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
   };
 
-  const handleCopy = () => {
-    if (result) {
-      navigator.clipboard.writeText(result.short_url);
-      setCopied(true);
-      setToastShow(true);
-      
-      setTimeout(() => {
-        setToastShow(false);
-        setTimeout(() => setCopied(false), 200);
-      }, 2000);
+  const handleCopy = async () => {
+    if (result?.short_url) {
+      const ok = await copyText(result.short_url);
+      if (ok) {
+        setCopied(true);
+        setToastShow(true);
+        setTimeout(() => {
+          setToastShow(false);
+          setTimeout(() => setCopied(false), 200);
+        }, 2000);
+      }
     }
   };
 
@@ -180,6 +189,7 @@ const ShortenerForm = () => {
               <input 
                 id="hero-input"
                 type="url" 
+                inputMode="url"
                 className="url-input-new" 
                 placeholder="https://your-long-url.com/very/long/path" 
                 value={url}
@@ -337,7 +347,7 @@ const ShortenerForm = () => {
           )}
         </div>
 
-        {/* Right Column: Analytics explanation without fabricated runtime data */}
+        {/* Right Column: Analytics overview */}
         <div className="hero-right">
           <div className="analytics-preview-dashboard">
             <div className="dashboard-header-row">
@@ -424,7 +434,7 @@ const ShortenerForm = () => {
               <span style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>Avg latency</span>
             </div>
             <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
-              Built on cloud edge instances with PostgreSQL-backed redirects to deliver instantaneous redirection.
+              Built with PostgreSQL and Redis caching for high-throughput, low-latency URL resolution.
             </p>
           </div>
         </div>
@@ -491,19 +501,19 @@ const ShortenerForm = () => {
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>For secure, large-scale APIs and corporate teams.</p>
             <ul className="pricing-features-list">
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>Dedicated edge instances</span>
+                <Check size={16} aria-hidden="true" /> <span>Dedicated instances</span>
               </li>
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>SSO / SAML authentication</span>
+                <Check size={16} aria-hidden="true" /> <span>SSO / OAuth authentication</span>
               </li>
               <li className="pricing-feature-item">
                 <Check size={16} aria-hidden="true" /> <span>Reliable public redirects</span>
               </li>
               <li className="pricing-feature-item">
-                <Check size={16} aria-hidden="true" /> <span>API key rate limit control</span>
+                <Check size={16} aria-hidden="true" /> <span>API rate limit control</span>
               </li>
             </ul>
-            <a href="mailto:sales@bytelink.co" className="btn-pricing-action" aria-label="Contact sales for enterprise plan">Contact Sales</a>
+            <a href="#hero-input" className="btn-pricing-action" aria-label="Contact for enterprise plan">Contact Us</a>
           </div>
         </div>
       </section>
