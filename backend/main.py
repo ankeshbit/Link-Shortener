@@ -1,6 +1,9 @@
 import asyncio
+import html
+import ipaddress
 import json
 import os
+import re
 import secrets
 import string
 import time
@@ -10,12 +13,6 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 import httpx
-import models
-import security
-from firebase_config import initialize_firebase
-
-# Local imports
-from database import SessionLocal, engine, get_db
 from dotenv import load_dotenv
 from fastapi import (
     BackgroundTasks,
@@ -28,16 +25,23 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from loguru import logger
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
-from redis_client import redis_cache
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+import models
+import security
+from database import SessionLocal, engine, get_db
+from firebase_config import initialize_firebase
+from redis_client import redis_cache
 
 # Load environment variables
 load_dotenv()
@@ -69,9 +73,7 @@ async def lifespan(app: FastAPI):
         if redis_cache.ping():
             logger.info("Redis connectivity verified successfully.")
         else:
-            logger.warning(
-                "Redis ping returned False. Running in degraded mode."
-            )
+            logger.warning("Redis ping returned False. Running in degraded mode.")
     except Exception as e:
         logger.warning(
             f"Redis connection verification failed: {e}. Running in degraded mode."
@@ -120,7 +122,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         f"Validation error on {request.method} {request.url.path}: {exc.errors()}"
     )
     raw_errors = jsonable_encoder(exc.errors())
-    first_msg = raw_errors[0].get("msg", "Validation failed") if raw_errors else "Validation failed"
+    first_msg = (
+        raw_errors[0].get("msg", "Validation failed")
+        if raw_errors
+        else "Validation failed"
+    )
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
@@ -136,7 +142,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def pydantic_validation_exception_handler(request: Request, exc: ValidationError):
     logger.error(f"Pydantic Validation error: {exc.errors()}")
     raw_errors = jsonable_encoder(exc.errors())
-    first_msg = raw_errors[0].get("msg", "Validation failed") if raw_errors else "Validation failed"
+    first_msg = (
+        raw_errors[0].get("msg", "Validation failed")
+        if raw_errors
+        else "Validation failed"
+    )
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={
@@ -148,8 +158,8 @@ async def pydantic_validation_exception_handler(request: Request, exc: Validatio
     )
 
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     logger.error(
         f"HTTP exception on {request.method} {request.url.path}: {exc.status_code} - {exc.detail}"
     )
@@ -157,7 +167,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content={
             "status": "error",
-            "message": exc.detail,
+            "message": str(exc.detail),
             "detail": exc.detail,
         },
         headers=getattr(exc, "headers", None) or {},
@@ -169,7 +179,11 @@ async def integrity_exception_handler(request: Request, exc: IntegrityError):
     logger.error(
         f"Database integrity error on {request.method} {request.url.path}: {exc}"
     )
-    msg = "Alias already in use. Please select another alias." if "urls_short_id" in str(exc).lower() else "Database conflict: Integrity constraint violated."
+    msg = (
+        "Alias already in use. Please select another alias."
+        if "urls_short_id" in str(exc).lower()
+        else "Database conflict: Integrity constraint violated."
+    )
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content={
@@ -212,7 +226,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
     )
 
 
-# Configure CORS Origins
+# Environment and Public URL Configuration
 ENVIRONMENT = os.getenv("ENV", "development").strip().lower()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 if not PUBLIC_BASE_URL and ENVIRONMENT != "production":
@@ -230,12 +244,13 @@ if parsed_public_url.scheme not in {"http", "https"} or not parsed_public_url.ne
 if ENVIRONMENT == "production" and parsed_public_url.scheme != "https":
     raise RuntimeError("PUBLIC_BASE_URL must use HTTPS in production.")
 
-# Build the list of allowed origins.
+# Build allowed CORS origins strictly from configuration
 origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
-if ENVIRONMENT == "production":
-    origins.append("https://link-shortener-mauve-pi.vercel.app")
-elif parsed_public_url.hostname:
-    origins.append(f"http://{parsed_public_url.hostname}:5173")
+if parsed_public_url.hostname and parsed_public_url.hostname not in {
+    "localhost",
+    "127.0.0.1",
+}:
+    origins.append(f"{parsed_public_url.scheme}://{parsed_public_url.netloc}")
 if PUBLIC_BASE_URL not in origins:
     origins.append(PUBLIC_BASE_URL)
 
@@ -248,10 +263,17 @@ for url in CORS_ALLOWED_ORIGINS.split(","):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"^https://.*\.vercel\.app$" if ENVIRONMENT == "production" else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Reverse proxy and legacy auth flags
+TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", "0"))
+ENABLE_LEGACY_AUTH = os.getenv("ENABLE_LEGACY_AUTH", "false").strip().lower() in (
+    "true",
+    "1",
+    "yes",
 )
 
 
@@ -309,7 +331,6 @@ class ConnectionManager:
         self.active_connections: dict[str, list[WebSocket]] = {}
 
     async def connect(self, short_id: str, websocket: WebSocket):
-        await websocket.accept()
         if short_id not in self.active_connections:
             self.active_connections[short_id] = []
         self.active_connections[short_id].append(websocket)
@@ -336,33 +357,56 @@ manager = ConnectionManager()
 
 
 def get_client_ip(request: Request) -> str:
-    """Return the original client address when a trusted proxy supplies it."""
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",", 1)[0].strip()
-    return request.client.host if request.client else "unknown"
+    """Return the client IP, respecting TRUSTED_PROXY_COUNT for reverse proxies."""
+    remote_ip = request.client.host if request.client else "127.0.0.1"
+
+    if TRUSTED_PROXY_COUNT > 0:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            ips = [ip.strip() for ip in forwarded_for.split(",") if ip.strip()]
+            if len(ips) >= TRUSTED_PROXY_COUNT:
+                candidate_ip = ips[-TRUSTED_PROXY_COUNT]
+                try:
+                    ipaddress.ip_address(candidate_ip)
+                    return candidate_ip
+                except ValueError:
+                    logger.warning(
+                        f"Invalid IP address in X-Forwarded-For: {candidate_ip}"
+                    )
+
+    try:
+        ipaddress.ip_address(remote_ip)
+        return remote_ip
+    except ValueError:
+        return "127.0.0.1"
+
+
+def check_rate_limit(key: str, limit: int = 20, window: int = 60):
+    """
+    Atomic rate limiting with Redis Lua script.
+    Re-raises HTTPException on limit exceeded.
+    Fails open only for infrastructure/connection errors.
+    """
+    try:
+        current = redis_cache.atomic_incr_expire(key, expire=window)
+        if current is not None and current > limit:
+            logger.warning(f"Rate limit exceeded for {key} ({current}/{limit})")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many requests. Rate limit is {limit} requests per minute.",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Rate limiting infrastructure error: {e}")
+        return True
+    return True
 
 
 def rate_limit(request: Request):
     client_ip = get_client_ip(request)
     key = f"rate_limit:{client_ip}"
-    try:
-        current = redis_cache.incr(key)
-        if current is None:
-            return True
-        if current == 1:
-            redis_cache.expire(key, 60)
-        if current > 20:
-            logger.warning(f"IP {client_ip} exceeded rate limit.")
-            raise HTTPException(
-                status_code=429,
-                detail="Too many requests. Rate limit is 20 requests per minute.",
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"Rate limiting check failed: {e}")
-    return True
+    return check_rate_limit(key, limit=20, window=60)
 
 
 def generate_short_id(length: int = 7) -> str:
@@ -448,12 +492,36 @@ def track_click(short_id: str, user_agent: str, ip: str):
         stats_data = compile_stats(url, db)
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                manager.broadcast(short_id, {"type": "click_update", "data": stats_data}),
+                manager.broadcast(
+                    short_id, {"type": "click_update", "data": stats_data}
+                ),
                 loop,
             )
 
 
 # Pydantic schemas
+ALIAS_REGEX = re.compile(r"^[A-Za-z0-9_-]{3,50}$")
+RESERVED_ALIASES = {
+    "api",
+    "docs",
+    "redoc",
+    "openapi.json",
+    "health",
+    "favicon.ico",
+    "ws",
+    "stats",
+    "user",
+    "auth",
+    "shorten",
+    "dashboard",
+    "login",
+    "register",
+    "static",
+    "null",
+    "undefined",
+}
+
+
 class URLCreate(BaseModel):
     target_url: str
     custom_alias: Optional[str] = None
@@ -467,6 +535,24 @@ class URLCreate(BaseModel):
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
             raise ValueError("target_url must be an absolute HTTP(S) URL")
         return value
+
+    @field_validator("custom_alias")
+    @classmethod
+    def validate_custom_alias(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        if not ALIAS_REGEX.match(trimmed):
+            raise ValueError(
+                "custom_alias must be 3-50 characters long and contain only letters, numbers, underscores, or hyphens."
+            )
+        if trimmed.lower() in RESERVED_ALIASES:
+            raise ValueError(
+                f"'{trimmed}' is a reserved route name and cannot be used as a custom alias."
+            )
+        return trimmed
 
 
 class UserRegister(BaseModel):
@@ -485,7 +571,13 @@ class TokenRefreshRequest(BaseModel):
 
 
 @app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
-def register_user(item: UserRegister, db: Session = Depends(get_db)):
+def register_user(item: UserRegister, request: Request, db: Session = Depends(get_db)):
+    if not ENABLE_LEGACY_AUTH:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Legacy password authentication is disabled. Please use Google authentication.",
+        )
+    check_rate_limit(f"rate_limit:auth:{get_client_ip(request)}", limit=10, window=60)
     existing = db.query(models.User).filter(models.User.email == item.email).first()
     if existing:
         raise HTTPException(
@@ -508,7 +600,13 @@ def register_user(item: UserRegister, db: Session = Depends(get_db)):
 
 
 @app.post("/api/auth/login")
-def login_user(item: UserLogin, db: Session = Depends(get_db)):
+def login_user(item: UserLogin, request: Request, db: Session = Depends(get_db)):
+    if not ENABLE_LEGACY_AUTH:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Legacy password authentication is disabled. Please use Google authentication.",
+        )
+    check_rate_limit(f"rate_limit:auth:{get_client_ip(request)}", limit=10, window=60)
     user = db.query(models.User).filter(models.User.email == item.email).first()
     if (
         not user
@@ -530,7 +628,15 @@ def login_user(item: UserLogin, db: Session = Depends(get_db)):
 
 
 @app.post("/api/auth/refresh")
-def refresh_token(item: TokenRefreshRequest, db: Session = Depends(get_db)):
+def refresh_token(
+    item: TokenRefreshRequest, request: Request, db: Session = Depends(get_db)
+):
+    if not ENABLE_LEGACY_AUTH:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Legacy password authentication is disabled. Please use Google authentication.",
+        )
+    check_rate_limit(f"rate_limit:auth:{get_client_ip(request)}", limit=10, window=60)
     payload = security.decode_refresh_token(item.refresh_token)
     if not payload:
         raise HTTPException(
@@ -568,7 +674,9 @@ def get_user_me(
         "id": current_user.id,
         "email": current_user.email,
         "firebase_uid": current_user.firebase_uid,
-        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "created_at": (
+            current_user.created_at.isoformat() if current_user.created_at else None
+        ),
     }
 
 
@@ -580,7 +688,9 @@ def sync_user(
         "id": current_user.id,
         "email": current_user.email,
         "firebase_uid": current_user.firebase_uid,
-        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "created_at": (
+            current_user.created_at.isoformat() if current_user.created_at else None
+        ),
     }
 
 
@@ -627,7 +737,7 @@ def delete_user_link(
 
     # Remove from cache
     try:
-        redis_cache.set(f"url:{short_id}", "", ex=1)
+        redis_cache.delete(f"url:{short_id}")
     except Exception as e:
         logger.warning(f"Could not clear cache for deleted url {short_id}: {e}")
 
@@ -659,10 +769,13 @@ def create_short_url(
         short_id = item.custom_alias
     else:
         short_id = generate_short_id()
-        while db.query(models.URL).filter(models.URL.short_id == short_id).first():
+        while (
+            short_id in RESERVED_ALIASES
+            or db.query(models.URL).filter(models.URL.short_id == short_id).first()
+        ):
             short_id = generate_short_id()
 
-    # Secure password if provided
+    # Secure password with bcrypt if provided
     hashed_pwd = security.hash_link_password(item.password) if item.password else None
 
     try:
@@ -708,40 +821,41 @@ def create_short_url(
     }
 
 
-def get_html_template(title, body_content):
-    return f"""
-    <html>
-    <head>
-        <title>{title}</title>
-        <style>
-            body {{ background-color: #0f172a; color: #f1f5f9; font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
-            .card {{ background: rgba(255, 255, 255, 0.05); padding: 2.5rem; border-radius: 1rem; backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); text-align: center; max-width: 400px; width: 100%; box-sizing: border-box; }}
-            input {{ width: 100%; padding: 0.75rem; margin-top: 1rem; border-radius: 0.5rem; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2); color: white; box-sizing: border-box; outline: none; }}
-            input:focus {{ border-color: #6366f1; }}
-            button {{ width: 100%; padding: 0.75rem; margin-top: 1rem; border-radius: 0.5rem; border: none; background: #6366f1; color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }}
-            button:hover {{ background: #4f46e5; }}
-            .error {{ color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            {body_content}
-        </div>
-    </body>
-    </html>
-    """
+def get_html_template(title: str, body_content: str) -> str:
+    escaped_title = html.escape(title)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{escaped_title}</title>
+    <style>
+        body {{ background-color: #0f172a; color: #f1f5f9; font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+        .card {{ background: rgba(255, 255, 255, 0.05); padding: 2.5rem; border-radius: 1rem; backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); text-align: center; max-width: 400px; width: 100%; box-sizing: border-box; }}
+        input {{ width: 100%; padding: 0.75rem; margin-top: 1rem; border-radius: 0.5rem; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.2); color: white; box-sizing: border-box; outline: none; }}
+        input:focus {{ border-color: #6366f1; }}
+        button {{ width: 100%; padding: 0.75rem; margin-top: 1rem; border-radius: 0.5rem; border: none; background: #6366f1; color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }}
+        button:hover {{ background: #4f46e5; }}
+        .error {{ color: #ef4444; margin-top: 1rem; font-size: 0.9rem; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        {body_content}
+    </div>
+</body>
+</html>"""
 
 
 # Redirection endpoints
-@app.get("/{short_id}")
+@app.api_route("/{short_id}", methods=["GET", "HEAD"])
 def redirect_url(
     short_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    if short_id in ["api", "favicon.ico"]:
-        raise HTTPException(status_code=404)
+    if short_id in RESERVED_ALIASES:
+        raise HTTPException(status_code=404, detail="Not Found")
 
     cache_entry = None
     try:
@@ -786,7 +900,9 @@ def redirect_url(
 
     # Expiry verification
     if expires_at:
-        exp_utc = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        exp_utc = (
+            expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        )
         if datetime.now(timezone.utc) > exp_utc:
             logger.info(f"Access attempt to expired link: {short_id}")
             return HTMLResponse(
@@ -798,10 +914,11 @@ def redirect_url(
 
     # Render unlock page if password is set
     if password:
+        escaped_short_id = html.escape(short_id)
         form = f"""
             <h2>Unlock Link</h2>
             <p style="color: #94a3b8; font-size: 0.9em; margin-bottom: 1.5rem;">This link is password protected.</p>
-            <form method="post" action="/{short_id}">
+            <form method="post" action="/{escaped_short_id}">
                 <input type="password" name="password" placeholder="Enter password" required />
                 <button type="submit">Unlock</button>
             </form>
@@ -823,13 +940,21 @@ def verify_password_and_redirect(
     db: Session = Depends(get_db),
     password: str = Form(...),
 ):
+    ip = get_client_ip(request)
+    # Rate limit password unlock attempts: 5 attempts per min per IP + short_id
+    check_rate_limit(f"rate_limit:unlock:{ip}:{short_id}", limit=5, window=60)
+
     url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
     if not url:
         raise HTTPException(status_code=404, detail="URL not found")
 
     # Expiry verification
     if url.expires_at:
-        exp_utc = url.expires_at if url.expires_at.tzinfo else url.expires_at.replace(tzinfo=timezone.utc)
+        exp_utc = (
+            url.expires_at
+            if url.expires_at.tzinfo
+            else url.expires_at.replace(tzinfo=timezone.utc)
+        )
         if datetime.now(timezone.utc) > exp_utc:
             return HTMLResponse(
                 get_html_template(
@@ -839,20 +964,36 @@ def verify_password_and_redirect(
             )
 
     # Password check
-    if url.password and not security.verify_link_password(password, url.password):
-        form = f"""
-            <h2>Unlock Link</h2>
-            <p style="color: #94a3b8; font-size: 0.9em; margin-bottom: 1.5rem;">This link is password protected.</p>
-            <form method="post" action="/{short_id}">
-                <input type="password" name="password" placeholder="Enter password" required />
-                <button type="submit">Unlock</button>
-                <div class="error">Incorrect password. Please try again.</div>
-            </form>
-        """
-        return HTMLResponse(get_html_template("Password Required", form))
+    if url.password:
+        if not security.verify_link_password(password, url.password):
+            escaped_short_id = html.escape(short_id)
+            form = f"""
+                <h2>Unlock Link</h2>
+                <p style="color: #94a3b8; font-size: 0.9em; margin-bottom: 1.5rem;">This link is password protected.</p>
+                <form method="post" action="/{escaped_short_id}">
+                    <input type="password" name="password" placeholder="Enter password" required />
+                    <button type="submit">Unlock</button>
+                    <div class="error">Incorrect password. Please try again.</div>
+                </form>
+            """
+            return HTMLResponse(get_html_template("Password Required", form))
+
+        # Seamless re-hash: migrate legacy SHA-256 to bcrypt upon successful unlock
+        if security.link_password_needs_rehash(url.password):
+            url.password = security.hash_link_password(password)
+            try:
+                db.commit()
+                db.refresh(url)
+                logger.info(
+                    f"Migrated legacy link password to bcrypt for short_id: {short_id}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not re-hash legacy link password for {short_id}: {e}"
+                )
+                db.rollback()
 
     user_agent = request.headers.get("user-agent", "Unknown")
-    ip = request.client.host
     background_tasks.add_task(track_click, short_id, user_agent, ip)
 
     return RedirectResponse(url=url.target_url, status_code=303)
@@ -874,28 +1015,50 @@ def get_stats(
     return compile_stats(url, db)
 
 
+def _verify_ws_token_and_get_stats(token: str, short_id: str):
+    """Synchronous helper run off the event loop for WebSocket auth and DB lookup."""
+    with SessionLocal() as db:
+        user = security.get_current_user_from_token(token, db)
+        if not user:
+            return None, "Authentication required"
+        url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
+        if not url or url.user_id != user.id:
+            return None, "Link not found or unauthorized"
+        return compile_stats(url, db), None
+
+
 # Live WebSockets endpoint stats
 @app.websocket("/api/ws/stats/{short_id}")
 async def websocket_stats(websocket: WebSocket, short_id: str):
+    await websocket.accept()
     token = websocket.query_params.get("token")
-    with SessionLocal() as db:
-        user = security.get_current_user_from_token(token, db)
-        if user is None:
-            await websocket.close(code=1008, reason="Authentication required")
+    if not token:
+        try:
+            # Wait for first auth JSON frame: {"type": "auth", "token": "..."}
+            auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+            if isinstance(auth_msg, dict) and auth_msg.get("type") == "auth":
+                token = auth_msg.get("token")
+        except Exception:
+            await websocket.close(
+                code=1008, reason="Authentication timeout or invalid handshake"
+            )
             return
-        current_user_id = user.id
-        url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
-        if not url or url.user_id != current_user_id:
-            await websocket.close(code=1008, reason="Link not found or unauthorized")
-            return
-        initial_stats = compile_stats(url, db)
+
+    if not token:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+
+    # Run DB resolution off the event loop so async loop is not blocked
+    initial_stats, error_reason = await run_in_threadpool(
+        _verify_ws_token_and_get_stats, token, short_id
+    )
+    if error_reason:
+        await websocket.close(code=1008, reason=error_reason)
+        return
 
     await manager.connect(short_id, websocket)
     try:
-        await websocket.send_json(
-            {"type": "initial_stats", "data": initial_stats}
-        )
-        # Loop to keep socket active
+        await websocket.send_json({"type": "initial_stats", "data": initial_stats})
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

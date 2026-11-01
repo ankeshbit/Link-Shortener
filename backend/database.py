@@ -15,13 +15,17 @@ if not DATABASE_URL:
         "Configure it with the Neon PostgreSQL connection string."
     )
 
+
 def normalize_database_url(database_url: str) -> str:
     """Use the installed psycopg2 driver for every PostgreSQL URL."""
-    url = make_url(database_url)
+    try:
+        url = make_url(database_url)
+    except Exception:
+        raise RuntimeError("Invalid DATABASE_URL format. PostgreSQL is required.")
     if url.get_backend_name() != "postgresql":
+        safe_url = url.render_as_string(hide_password=True)
         raise RuntimeError(
-            f"Invalid DATABASE_URL schema: '{database_url}'. "
-            "PostgreSQL is required."
+            f"Invalid DATABASE_URL schema: '{safe_url}'. PostgreSQL is required."
         )
     return url.set(drivername="postgresql+psycopg2").render_as_string(
         hide_password=False

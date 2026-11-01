@@ -4,11 +4,11 @@ import time
 import urllib.request
 from typing import Any, Optional
 
+import firebase_admin
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
-import firebase_admin
 from firebase_admin import auth, credentials
 from jose import JWTError, jwt
 from loguru import logger
@@ -59,20 +59,20 @@ def initialize_firebase() -> bool:
         if project_id and client_email and private_key:
             clean_project_id = project_id.strip().strip("'\"")
             clean_client_email = client_email.strip().strip("'\"")
-            clean_private_key = (
-                private_key.strip().strip("'\"").replace("\\n", "\n")
-            )
+            clean_private_key = private_key.strip().strip("'\"").replace("\\n", "\n")
 
             logger.info(
                 f"Initializing Firebase Admin using individual credentials for project: {clean_project_id}."
             )
-            cred = credentials.Certificate({
-                "type": "service_account",
-                "project_id": clean_project_id,
-                "private_key": clean_private_key,
-                "client_email": clean_client_email,
-                "token_uri": "https://oauth2.googleapis.com/token",
-            })
+            cred = credentials.Certificate(
+                {
+                    "type": "service_account",
+                    "project_id": clean_project_id,
+                    "private_key": clean_private_key,
+                    "client_email": clean_client_email,
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            )
             firebase_admin.initialize_app(cred)
             _firebase_initialized = True
             _has_service_account_credentials = True
@@ -81,7 +81,9 @@ def initialize_firebase() -> bool:
         # 2. Service account JSON string
         service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
         if service_account_json and service_account_json.strip():
-            logger.info("Initializing Firebase Admin with FIREBASE_SERVICE_ACCOUNT_JSON.")
+            logger.info(
+                "Initializing Firebase Admin with FIREBASE_SERVICE_ACCOUNT_JSON."
+            )
             cred_dict = json.loads(service_account_json.strip())
             if "private_key" in cred_dict and isinstance(cred_dict["private_key"], str):
                 cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
@@ -135,7 +137,11 @@ def get_google_public_certs(force_refresh: bool = False) -> dict[str, str]:
     """
     global _google_certs_cache
     now = time.time()
-    if not force_refresh and _google_certs_cache["certs"] and now < _google_certs_cache["expires_at"]:
+    if (
+        not force_refresh
+        and _google_certs_cache["certs"]
+        and now < _google_certs_cache["expires_at"]
+    ):
         return _google_certs_cache["certs"]
 
     try:
@@ -158,14 +164,18 @@ def get_google_public_certs(force_refresh: bool = False) -> dict[str, str]:
             parsed_pem_certs = {}
             for kid, cert_str in raw_certs.items():
                 try:
-                    cert = x509.load_pem_x509_certificate(cert_str.encode("utf-8"), default_backend())
+                    cert = x509.load_pem_x509_certificate(
+                        cert_str.encode("utf-8"), default_backend()
+                    )
                     pem_bytes = cert.public_key().public_bytes(
                         encoding=serialization.Encoding.PEM,
                         format=serialization.PublicFormat.SubjectPublicKeyInfo,
                     )
                     parsed_pem_certs[kid] = pem_bytes.decode("utf-8")
                 except Exception as cert_err:
-                    logger.warning(f"Could not parse Google certificate {kid}: {cert_err}")
+                    logger.warning(
+                        f"Could not parse Google certificate {kid}: {cert_err}"
+                    )
 
             if parsed_pem_certs:
                 _google_certs_cache = {
@@ -202,7 +212,9 @@ def verify_firebase_token_with_public_keys(
     try:
         header = jwt.get_unverified_header(token)
     except Exception as e:
-        logger.warning(f"Firebase token rejected: could not decode JWT header ({type(e).__name__}).")
+        logger.warning(
+            f"Firebase token rejected: could not decode JWT header ({type(e).__name__})."
+        )
         return None
 
     kid = header.get("kid")
@@ -211,7 +223,9 @@ def verify_firebase_token_with_public_keys(
         logger.warning("Firebase token rejected: missing 'kid' in header.")
         return None
     if alg != "RS256":
-        logger.warning(f"Firebase token rejected: algorithm is '{alg}' (expected RS256).")
+        logger.warning(
+            f"Firebase token rejected: algorithm is '{alg}' (expected RS256)."
+        )
         return None
 
     certs = get_google_public_certs()
@@ -239,11 +253,17 @@ def verify_firebase_token_with_public_keys(
             return None
 
         auth_time = decoded.get("auth_time")
-        if auth_time and isinstance(auth_time, (int, float)) and auth_time > time.time() + 300:
+        if (
+            auth_time
+            and isinstance(auth_time, (int, float))
+            and auth_time > time.time() + 300
+        ):
             logger.warning("Firebase token rejected: auth_time is in the future.")
             return None
 
-        logger.info(f"Firebase public certificate verification succeeded for project '{project_id}' (uid prefix: {uid[:8]}...).")
+        logger.info(
+            f"Firebase public certificate verification succeeded for project '{project_id}' (uid prefix: {uid[:8]}...)."
+        )
         return {
             "uid": uid,
             "email": decoded.get("email"),
@@ -255,7 +275,9 @@ def verify_firebase_token_with_public_keys(
         logger.warning("Firebase ID token verification failed: token is expired.")
         return None
     except jwt.JWTClaimsError as e:
-        logger.warning(f"Firebase ID token claims verification failed: {e}. Configured project_id='{project_id}'.")
+        logger.warning(
+            f"Firebase ID token claims verification failed: {e}. Configured project_id='{project_id}'."
+        )
         return None
     except JWTError as e:
         logger.warning(f"Firebase ID token signature verification failed: {e}.")
@@ -281,10 +303,14 @@ def verify_firebase_id_token(token: str) -> Optional[dict[str, Any]]:
     if clean_token.lower().startswith("bearer "):
         clean_token = clean_token[7:].strip()
 
-    project_id = (os.getenv("FIREBASE_PROJECT_ID") or DEFAULT_PROJECT_ID).strip().strip("'\"")
+    project_id = (
+        (os.getenv("FIREBASE_PROJECT_ID") or DEFAULT_PROJECT_ID).strip().strip("'\"")
+    )
 
     # 1. In unit tests where auth.verify_id_token is mocked, dispatch directly
-    is_mocked = hasattr(auth.verify_id_token, "assert_called") or hasattr(auth.verify_id_token, "mock_calls")
+    is_mocked = hasattr(auth.verify_id_token, "assert_called") or hasattr(
+        auth.verify_id_token, "mock_calls"
+    )
     if is_mocked:
         try:
             decoded = auth.verify_id_token(clean_token, check_revoked=False)

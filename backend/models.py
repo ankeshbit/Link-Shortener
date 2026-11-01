@@ -1,7 +1,8 @@
-from database import Base
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
+from database import Base
 
 
 class User(Base):
@@ -29,10 +30,10 @@ class URL(Base):
     clicks_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=True)
-    password = Column(String, nullable=True)  # Hashed using SHA-256
+    password = Column(String, nullable=True)
 
     # Optional association with User (guest shorteners will have user_id=None)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
 
     user = relationship("User", back_populates="urls")
     clicks = relationship(
@@ -44,7 +45,7 @@ class ClickEvent(Base):
     __tablename__ = "click_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    url_id = Column(Integer, ForeignKey("urls.id"))
+    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"))
     ip_address = Column(String(50))
     country = Column(String(50))
     city = Column(String(50))

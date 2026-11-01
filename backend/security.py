@@ -1,58 +1,102 @@
+import base64
 import hashlib
+import hmac
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
-from database import get_db
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from firebase_config import verify_firebase_id_token
 from jose import JWTError, jwt
 from loguru import logger
-import models
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+import models
+from database import get_db
+from firebase_config import verify_firebase_id_token
 
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-# Legacy JWT configuration (optional during migration / fallback)
-JWT_SECRET = os.getenv("JWT_SECRET", "bytelink-legacy-secret-key-fallback")
+# Strict JWT secret enforcement: fail fast at startup if missing or < 32 characters
+JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
+_allow_short_jwt = os.getenv("ALLOW_SHORT_JWT_SECRET", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+if not JWT_SECRET or (len(JWT_SECRET) < 32 and not _allow_short_jwt):
+    raise RuntimeError(
+        "JWT_SECRET environment variable is missing or shorter than 32 characters."
+    )
+
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
 
-def hash_link_password(password: str) -> str:
-    """Hashes a short-link password using SHA-256."""
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+def _prepare_password_for_bcrypt(password: str) -> bytes:
+    """
+    Pre-hashes password with SHA-256 and base64-encodes it (44 bytes).
+    This prevents bcrypt's 72-byte silent truncation while maintaining high entropy.
+    """
+    return base64.b64encode(hashlib.sha256(password.encode("utf-8")).digest())
 
 
-def verify_link_password(plain_password: str, hashed_password: str) -> bool:
-    """Verifies a plain short-link password against its SHA-256 hash."""
-    return hashlib.sha256(plain_password.encode("utf-8")).hexdigest() == hashed_password
+def get_password_hash(password: str) -> str:
+    """Generates a secure bcrypt hash of a password, pre-hashed to prevent 72-byte truncation."""
+    prep = _prepare_password_for_bcrypt(password)
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(prep, salt).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifies a plain text password against its bcrypt hashed value."""
     if not hashed_password or not plain_password:
         return False
+    # Check pre-hashed first
     try:
-        return bcrypt.checkpw(
-            plain_password.encode("utf-8"), hashed_password.encode("utf-8")
-        )
+        prep = _prepare_password_for_bcrypt(plain_password)
+        if bcrypt.checkpw(prep, hashed_password.encode("utf-8")):
+            return True
     except Exception:
+        pass
+    # Fallback for raw legacy bcrypt hashes without pre-hashing
+    try:
+        raw_bytes = plain_password.encode("utf-8")
+        if bcrypt.checkpw(raw_bytes, hashed_password.encode("utf-8")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def hash_link_password(password: str) -> str:
+    """Hashes a short-link password using bcrypt with SHA-256 pre-hashing."""
+    return get_password_hash(password)
+
+
+def link_password_needs_rehash(hashed_password: str) -> bool:
+    """Returns True if the link password was stored using legacy SHA-256 and requires bcrypt re-hashing."""
+    if not hashed_password:
         return False
+    return not hashed_password.startswith(("$2b$", "$2a$", "$2y$"))
 
 
-def get_password_hash(password: str) -> str:
-    """Generates a secure bcrypt hash of a plain text password."""
-    pwd_bytes = password.encode("utf-8")
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(pwd_bytes, salt)
-    return hashed.decode("utf-8")
+def verify_link_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verifies a plain short-link password against its hash.
+    Supports bcrypt hashes as well as legacy SHA-256 hashes verified in constant time.
+    """
+    if not hashed_password or not plain_password:
+        return False
+    if hashed_password.startswith(("$2b$", "$2a$", "$2y$")):
+        return verify_password(plain_password, hashed_password)
+    # Legacy SHA-256 fallback in constant time
+    legacy_hash = hashlib.sha256(plain_password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy_hash, hashed_password)
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
@@ -145,6 +189,15 @@ def get_or_create_user_from_firebase(db: Session, firebase_info: dict) -> models
     if email:
         user = db.query(models.User).filter(models.User.email == email).first()
         if user:
+            # Prevent account pre-hijacking: only link if email is verified by identity provider
+            if not firebase_info.get("email_verified"):
+                logger.warning(
+                    f"Refusing to link unverified identity provider account for email: {email}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cannot link account: email is not verified by provider.",
+                )
             logger.info(
                 f"Linking existing user account ID {user.id} ({email}) with firebase_uid: {uid}"
             )
@@ -170,10 +223,14 @@ def get_or_create_user_from_firebase(db: Session, firebase_info: dict) -> models
     except Exception:
         db.rollback()
         # Query again in case user was created concurrently
-        user = db.query(models.User).filter(
-            (models.User.firebase_uid == uid)
-            | (models.User.email == (email or f"{uid}@firebase.user"))
-        ).first()
+        user = (
+            db.query(models.User)
+            .filter(
+                (models.User.firebase_uid == uid)
+                | (models.User.email == (email or f"{uid}@firebase.user"))
+            )
+            .first()
+        )
         if user:
             return user
         raise
@@ -188,7 +245,9 @@ def get_current_user(
     Verifies Firebase ID token, resolves the user in Neon DB, and returns the User model instance.
     """
     if not token:
-        logger.debug("Authentication check: No Authorization token provided in request.")
+        logger.debug(
+            "Authentication check: No Authorization token provided in request."
+        )
         return None
 
     clean_token = token.strip()
@@ -198,7 +257,9 @@ def get_current_user(
     logger.debug(f"Processing Authorization token (length: {len(clean_token)} chars).")
     firebase_info = verify_firebase_id_token(clean_token)
     if firebase_info:
-        logger.debug(f"Firebase token verified. Resolving user in database for UID prefix: {firebase_info.get('uid', '')[:8]}...")
+        logger.debug(
+            f"Firebase token verified. Resolving user in database for UID prefix: {firebase_info.get('uid', '')[:8]}..."
+        )
         return get_or_create_user_from_firebase(db, firebase_info)
 
     # Legacy token fallback (e.g. for existing automated test suite compatibility)
@@ -213,7 +274,9 @@ def get_current_user(
         except (ValueError, TypeError):
             pass
 
-    logger.warning("Authentication failed: Supplied token is neither a valid Firebase ID token nor an internal JWT.")
+    logger.warning(
+        "Authentication failed: Supplied token is neither a valid Firebase ID token nor an internal JWT."
+    )
     return None
 
 
@@ -229,7 +292,9 @@ def require_current_user(
 ) -> models.User:
     """Requires an authenticated user or raises HTTP 401."""
     if user is None:
-        logger.warning("Access denied: require_current_user found no authenticated user (raising HTTP 401).")
+        logger.warning(
+            "Access denied: require_current_user found no authenticated user (raising HTTP 401)."
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",

@@ -42,7 +42,10 @@ Ensure `.env` files contain your local configuration:
   ACCESS_TOKEN_EXPIRE_MINUTES=60
   REFRESH_TOKEN_EXPIRE_DAYS=7
   FIREBASE_PROJECT_ID=link-shortener-6c96e
+  ENABLE_LEGACY_AUTH=false
+  TRUSTED_PROXY_COUNT=0
   ```
+  *(Note: `JWT_SECRET` must be at least 32 characters long. The backend fails fast at startup if it is missing or too short).*
 - In `frontend\.env`:
   ```ini
   VITE_API_URL=http://localhost:8000

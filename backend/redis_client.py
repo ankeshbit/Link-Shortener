@@ -29,7 +29,9 @@ class SafeRedisClient:
             logger.warning("REDIS_URL is not configured; Redis features are disabled.")
             return
         if redis is None:
-            logger.warning("Redis package is not installed; Redis features are disabled.")
+            logger.warning(
+                "Redis package is not installed; Redis features are disabled."
+            )
             return
 
         try:
@@ -84,9 +86,7 @@ class SafeRedisClient:
                 method = getattr(self.client, method_name)
                 return method(*args, **kwargs)
             except Exception as e:
-                logger.error(
-                    f"Redis operation '{method_name}' failed: {e}."
-                )
+                logger.error(f"Redis operation '{method_name}' failed: {e}.")
                 self.client = (
                     None  # Set client to None to trigger reconnect logic next time
                 )
@@ -100,11 +100,37 @@ class SafeRedisClient:
     def set(self, key, value, ex=None):
         return self._execute("set", key, value, ex=ex)
 
+    def delete(self, key):
+        return self._execute("delete", key)
+
     def incr(self, key):
         return self._execute("incr", key)
 
     def expire(self, key, seconds):
         return self._execute("expire", key, seconds)
+
+    def atomic_incr_expire(self, key: str, expire: int = 60) -> int | None:
+        """Atomically increments a key and sets expiration if it's the first hit."""
+        lua_script = """
+        local current = redis.call('INCR', KEYS[1])
+        if tonumber(current) == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return current
+        """
+        if self._should_attempt_reconnect():
+            self._init_client()
+
+        if self.client:
+            try:
+                result = self.client.eval(lua_script, 1, key, expire)
+                return int(result) if result is not None else None
+            except Exception as e:
+                logger.error(f"Redis atomic_incr_expire failed: {e}")
+                self.client = None
+                self.last_reconnect_attempt = time.time()
+                return None
+        return None
 
     def ping(self) -> bool:
         if self._should_attempt_reconnect():
