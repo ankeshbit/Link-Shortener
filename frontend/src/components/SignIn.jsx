@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Loader2, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, Loader2, ShieldCheck, AlertCircle } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 
 const GoogleIcon = () => (
@@ -31,6 +31,20 @@ const SignIn = () => {
   const location = useLocation();
   const { isAuthenticated, loginWithGoogle } = useAuth();
 
+  const [sessionExpired, setSessionExpired] = useState(() => {
+    return Boolean(
+      location.state?.sessionExpired || 
+      (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('session_expired'))
+    );
+  });
+
+  useEffect(() => {
+    if (location.state?.sessionExpired) {
+      sessionStorage.setItem('session_expired', '1');
+      setSessionExpired(true);
+    }
+  }, [location.state]);
+
   const returnTo = location.state?.from?.pathname
     ? `${location.state.from.pathname}${location.state.from.search || ''}${location.state.from.hash || ''}`
     : typeof location.state?.from === 'string'
@@ -38,16 +52,19 @@ const SignIn = () => {
       : '/dashboard';
 
   useEffect(() => {
-    if (isAuthenticated) {
+    // Only auto-redirect to returnTo if authenticated AND session is not expired
+    if (isAuthenticated && !sessionExpired) {
       navigate(returnTo, { replace: true });
     }
-  }, [isAuthenticated, navigate, returnTo]);
+  }, [isAuthenticated, navigate, returnTo, sessionExpired]);
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
     setError('');
 
     try {
+      sessionStorage.removeItem('session_expired');
+      setSessionExpired(false);
       await loginWithGoogle();
       navigate(returnTo, { replace: true });
     } catch (err) {
@@ -94,6 +111,28 @@ const SignIn = () => {
             Authenticate securely using your Google account to create, manage, and track real-time URL analytics.
           </p>
         </div>
+
+        {sessionExpired && (
+          <div
+            role="alert"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: '10px',
+              padding: '10px 14px',
+              color: '#f87171',
+              fontSize: '14px',
+              width: '100%',
+              marginTop: '8px',
+            }}
+          >
+            <AlertCircle size={18} style={{ flexShrink: 0 }} />
+            <span>Your session has expired. Please sign in again.</span>
+          </div>
+        )}
 
         {error && (
           <div className="error-toast-new" role="alert" style={{ width: '100%' }}>

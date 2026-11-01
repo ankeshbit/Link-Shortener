@@ -7,12 +7,14 @@ import {
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { copyText } from '../utils/clipboard';
+import { useAuth } from '../auth/AuthContext';
 
 const Dashboard = () => {
   const [links, setLinks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [copiedId, setCopiedId] = useState(null);
+  const { signOut } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -26,8 +28,8 @@ const Dashboard = () => {
       } catch (err) {
         if (!isMounted) return;
         if (err.response?.status === 401) {
-          localStorage.removeItem('token');
-          navigate('/login');
+          await signOut();
+          navigate('/login', { state: { sessionExpired: true } });
         } else {
           setError('Failed to load your shortened URLs. Please try again.');
         }
@@ -42,7 +44,7 @@ const Dashboard = () => {
     return () => {
       isMounted = false;
     };
-  }, [navigate]);
+  }, [navigate, signOut]);
 
   const handleDelete = async (shortId) => {
     if (!window.confirm('Are you sure you want to delete this short URL?')) return;
@@ -74,112 +76,105 @@ const Dashboard = () => {
   }
 
   return (
-    <div style={{ animation: 'fadeIn 0.5s ease-out' }}>
-      <div className="stats-page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+    <div className="dashboard-container" style={{ animation: 'fadeIn 0.5s ease-out', maxWidth: '1200px', margin: '2rem auto', padding: '0 1.5rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', flexWrap: 'wrap', gap: '1rem' }}>
         <div>
-          <h1 className="stats-title">User Dashboard</h1>
-          <p style={{ color: 'var(--text-secondary)' }}>Manage your shortened links and track audience analytics.</p>
+          <h1 style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--text-primary)' }}>Your Links</h1>
+          <p style={{ color: 'var(--text-secondary)', marginTop: '0.25rem' }}>Manage and track performance for your shortened URLs</p>
         </div>
-        <Link to="/" className="btn-action primary-action" style={{ borderRadius: '12px', padding: '10px 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Plus size={16} /> Shorten New Link
+        <Link to="/#hero-input" className="btn-nav-primary" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px 18px' }}>
+          <Plus size={18} />
+          <span>Shorten New URL</span>
         </Link>
       </div>
 
-      {/* Stats Summary Cards */}
-      <div className="stats-grid-main" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '24px', marginBottom: '2.5rem' }}>
-        <div className="stats-card-main">
-          <div className="stats-card-main-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
-            <LinkIcon size={18} color="var(--accent)" />
-            Total Links
-          </div>
-          <div className="stats-card-main-number">{links.length}</div>
-        </div>
-
-        <div className="stats-card-main">
-          <div className="stats-card-main-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)' }}>
-            <TrendingUp size={18} color="var(--accent-secondary)" />
-            Accumulated Clicks
-          </div>
-          <div className="stats-card-main-number">{totalClicks}</div>
-        </div>
-      </div>
-
       {error && (
-        <div className="error-toast-new" role="alert" style={{ marginBottom: '2rem' }}>
+        <div className="error-toast-new" role="alert" style={{ marginBottom: '1.5rem' }}>
           <span>{error}</span>
-          <button type="button" className="error-close-new" onClick={() => setError('')}>&times;</button>
+          <button type="button" onClick={() => setError('')} className="error-close-new">&times;</button>
         </div>
       )}
 
-      {/* Links List Card */}
-      <div className="stats-log-card" style={{ padding: '32px' }}>
-        <h3 className="stats-log-title" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '1.5rem', color: 'var(--text-primary)' }}>
-          <Clock size={20} color="var(--accent)" /> Shortened Links History
-        </h3>
-
-        {links.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '48px 0', border: '1px dashed var(--border)', borderRadius: '16px' }}>
-            <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>You haven't shortened any URLs yet.</p>
-            <Link to="/" className="btn-action" style={{ display: 'inline-flex' }}>
-              Create Your First Link
-            </Link>
+      {/* Aggregate Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
+        <div className="card-glass" style={{ padding: '1.5rem', borderRadius: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+            <span>Total Links</span>
+            <LinkIcon size={20} color="var(--accent)" />
           </div>
-        ) : (
+          <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--text-primary)' }}>{links.length}</div>
+        </div>
+        <div className="card-glass" style={{ padding: '1.5rem', borderRadius: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+            <span>Total Clicks</span>
+            <TrendingUp size={20} color="#38bdf8" />
+          </div>
+          <div style={{ fontSize: '2rem', fontWeight: '700', color: 'var(--text-primary)' }}>{totalClicks}</div>
+        </div>
+      </div>
+
+      {/* Links List */}
+      {links.length === 0 ? (
+        <div className="card-glass" style={{ padding: '3rem', textAlign: 'center', borderRadius: '16px' }}>
+          <LinkIcon size={40} color="var(--text-muted)" style={{ margin: '0 auto 1rem auto' }} />
+          <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem' }}>No links shortened yet</h3>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Create your first shortened link to view performance analytics.</p>
+          <Link to="/#hero-input" className="btn-nav-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+            <Plus size={16} /> Shorten a link
+          </Link>
+        </div>
+      ) : (
+        <div className="card-glass" style={{ borderRadius: '16px', overflow: 'hidden' }}>
           <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '600px' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '700px' }}>
               <thead>
-                <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--text-secondary)', fontSize: '13px' }}>
-                  <th style={{ padding: '12px 16px', fontWeight: '600' }}>Short Link</th>
-                  <th style={{ padding: '12px 16px', fontWeight: '600' }}>Target Destination</th>
-                  <th style={{ padding: '12px 16px', fontWeight: '600', textAlign: 'center' }}>Clicks</th>
-                  <th style={{ padding: '12px 16px', fontWeight: '600' }}>Created</th>
-                  <th style={{ padding: '12px 16px', fontWeight: '600', textAlign: 'right' }}>Actions</th>
+                <tr style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.08)', background: 'rgba(255, 255, 255, 0.02)' }}>
+                  <th style={{ padding: '1rem 1.5rem', color: 'var(--text-muted)', fontSize: '13px', fontWeight: '600' }}>SHORT LINK</th>
+                  <th style={{ padding: '1rem 1.5rem', color: 'var(--text-muted)', fontSize: '13px', fontWeight: '600' }}>ORIGINAL URL</th>
+                  <th style={{ padding: '1rem 1.5rem', color: 'var(--text-muted)', fontSize: '13px', fontWeight: '600', textAlign: 'center' }}>CLICKS</th>
+                  <th style={{ padding: '1rem 1.5rem', color: 'var(--text-muted)', fontSize: '13px', fontWeight: '600' }}>CREATED</th>
+                  <th style={{ padding: '1rem 1.5rem', color: 'var(--text-muted)', fontSize: '13px', fontWeight: '600', textAlign: 'right' }}>ACTIONS</th>
                 </tr>
               </thead>
               <tbody>
                 {links.map((link) => (
-                  <tr key={link.id} style={{ borderBottom: '1px solid var(--border)', transition: 'background-color 0.2s' }} className="table-row-hover">
-                    <td style={{ padding: '16px 16px', fontWeight: '600' }}>
+                  <tr key={link.short_id} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.04)' }}>
+                    <td style={{ padding: '1rem 1.5rem' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ color: 'var(--accent-secondary)' }}>{link.short_id}</span>
-                        <button 
-                          onClick={() => handleCopy(link.short_url, link.id)}
-                          style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: '2px' }}
-                          title="Copy Link"
-                          aria-label="Copy short link"
+                        <a href={link.short_url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent)', fontWeight: '600', textDecoration: 'none' }}>
+                          {link.short_url}
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(link.short_url, link.short_id)}
+                          style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: copiedId === link.short_id ? '#34d399' : 'var(--text-muted)', padding: '2px' }}
+                          title="Copy to clipboard"
                         >
-                          {copiedId === link.id ? <Check size={14} color="var(--accent)" /> : <Copy size={14} />}
+                          {copiedId === link.short_id ? <Check size={14} /> : <Copy size={14} />}
                         </button>
                       </div>
                     </td>
-                    <td style={{ padding: '16px 16px', color: 'var(--text-secondary)', maxWidth: '250px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      <a href={link.target_url} target="_blank" rel="noopener noreferrer" style={{ color: 'inherit', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        {link.target_url} <ExternalLink size={12} style={{ opacity: 0.5 }} />
-                      </a>
+                    <td style={{ padding: '1rem 1.5rem' }}>
+                      <span style={{ color: 'var(--text-secondary)', display: 'block', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={link.original_url}>
+                        {link.original_url}
+                      </span>
                     </td>
-                    <td style={{ padding: '16px 16px', textAlign: 'center', fontWeight: '700', color: 'var(--text-primary)' }}>
+                    <td style={{ padding: '1rem 1.5rem', textAlign: 'center', fontWeight: '600', color: 'var(--text-primary)' }}>
                       {link.clicks_count}
                     </td>
-                    <td style={{ padding: '16px 16px', color: 'var(--text-muted)', fontSize: '13px' }}>
-                      {link.created_at ? formatDistanceToNow(new Date(link.created_at), { addSuffix: true }) : 'N/A'}
+                    <td style={{ padding: '1rem 1.5rem', color: 'var(--text-muted)', fontSize: '13px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Clock size={13} />
+                        <span>{link.created_at ? formatDistanceToNow(new Date(link.created_at), { addSuffix: true }) : 'Recently'}</span>
+                      </div>
                     </td>
-                    <td style={{ padding: '16px 16px', textAlign: 'right' }}>
+                    <td style={{ padding: '1rem 1.5rem', textAlign: 'right' }}>
                       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
-                        <Link 
-                          to={`/stats/${link.short_id}`} 
-                          className="btn-action" 
-                          style={{ padding: '6px 12px', borderRadius: '8px', fontSize: '12px' }}
-                          title="View Live Analytics"
-                        >
-                          <BarChart2 size={14} /> Stats
+                        <Link to={`/stats/${link.short_id}`} className="btn-action" style={{ padding: '6px 12px', fontSize: '13px' }}>
+                          <BarChart2 size={14} /> Analytics
                         </Link>
-                        <button 
-                          onClick={() => handleDelete(link.short_id)} 
-                          className="btn-action" 
-                          style={{ padding: '6px 12px', borderRadius: '8px', fontSize: '12px', color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.2)' }}
-                          title="Delete Link"
-                        >
-                          <Trash2 size={14} /> Delete
+                        <button onClick={() => handleDelete(link.short_id)} className="btn-action" style={{ padding: '6px 10px', color: '#f87171' }} title="Delete link">
+                          <Trash2 size={14} />
                         </button>
                       </div>
                     </td>
@@ -188,8 +183,8 @@ const Dashboard = () => {
               </tbody>
             </table>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

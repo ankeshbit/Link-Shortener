@@ -1,13 +1,38 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
 import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
 import { auth, signInWithGoogle as firebaseGoogleSignIn } from './firebase';
-import api from '../api/axios';
+import api, { setSessionExpiredHandler } from '../api/axios';
 
 const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  const signOut = useCallback(async () => {
+    try {
+      await firebaseSignOut(auth);
+    } catch (err) {
+      console.error('Error during sign out:', err);
+    } finally {
+      localStorage.removeItem('token');
+      localStorage.removeItem('refreshToken');
+      setUser(null);
+      window.dispatchEvent(new Event('authchange'));
+    }
+  }, []);
+
+  useEffect(() => {
+    // Register global axios session expiration callback
+    setSessionExpiredHandler(async () => {
+      await signOut();
+      sessionStorage.setItem('session_expired', '1');
+      if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
+    });
+    return () => setSessionExpiredHandler(null);
+  }, [signOut]);
 
   useEffect(() => {
     // Centralized Firebase Auth state observer
@@ -56,21 +81,9 @@ export const AuthProvider = ({ children }) => {
       photoURL: firebaseUser.photoURL,
     };
     setUser(userData);
+    sessionStorage.removeItem('session_expired');
     window.dispatchEvent(new Event('authchange'));
     return userData;
-  };
-
-  const signOut = async () => {
-    try {
-      await firebaseSignOut(auth);
-    } catch (err) {
-      console.error('Error during sign out:', err);
-    } finally {
-      localStorage.removeItem('token');
-      localStorage.removeItem('refreshToken');
-      setUser(null);
-      window.dispatchEvent(new Event('authchange'));
-    }
   };
 
   const getIdToken = async (forceRefresh = false) => {
@@ -89,7 +102,7 @@ export const AuthProvider = ({ children }) => {
       signOut,
       getIdToken,
     }),
-    [user, loading]
+    [user, loading, signOut]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
