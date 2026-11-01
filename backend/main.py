@@ -479,6 +479,60 @@ def compile_stats(url: models.URL, db: Session) -> dict:
     }
 
 
+def fetch_geoip(ip: str):
+    """
+    Fetches geographical metadata for public IPs using an HTTPS-only provider.
+    Fails quietly returning (None, None, None, None). Never uses plain HTTP.
+    """
+    if not ip or not is_public_ip(ip):
+        return None, None, None, None
+
+    provider = os.getenv("GEOIP_PROVIDER", "ipwho").strip().lower()
+    if provider in ("none", "disabled", "off", "false"):
+        return None, None, None, None
+
+    api_key = os.getenv("GEOIP_API_KEY", "").strip()
+
+    if provider == "ipwho":
+        url = f"https://ipwho.is/{ip}"
+        if api_key:
+            url += f"?key={api_key}"
+    elif provider == "ipapi":
+        url = f"https://ipapi.co/{ip}/json/"
+        if api_key:
+            url += f"?key={api_key}"
+    else:
+        url = f"https://ipwho.is/{ip}"
+
+    # Strict invariant: URL must always start with https://
+    if not url.startswith("https://"):
+        logger.error(f"GeoIP configuration error: Insecure URL generated: {url}")
+        return None, None, None, None
+
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            resp = client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                if provider == "ipwho":
+                    if data.get("success", True):
+                        country = data.get("country")
+                        city = data.get("city")
+                        lat = data.get("latitude")
+                        lon = data.get("longitude")
+                        return country, city, lat, lon
+                else:
+                    country = data.get("country_name") or data.get("country")
+                    city = data.get("city")
+                    lat = data.get("latitude")
+                    lon = data.get("longitude")
+                    return country, city, lat, lon
+    except Exception as e:
+        logger.debug(f"GeoIP lookup failed for {ip}: {e}")
+
+    return None, None, None, None
+
+
 def track_click(short_id: str, user_agent: str, ip: str):
     """Background task to record click event and broadcast live updates."""
     with SessionLocal() as db:
@@ -493,19 +547,7 @@ def track_click(short_id: str, user_agent: str, ip: str):
             synchronize_session="fetch",
         )
 
-        country, city, lat, lon = None, None, None, None
-        if ip and is_public_ip(ip):
-            try:
-                # Use HTTPS for GeoIP lookups, and only query for public addresses
-                with httpx.Client(timeout=2.0) as client:
-                    res = client.get(f"https://ipapi.co/{ip}/json/").json()
-                    if res.get("country_name"):
-                        country = res.get("country_name")
-                        city = res.get("city")
-                        lat = res.get("latitude")
-                        lon = res.get("longitude")
-            except Exception as e:
-                logger.debug(f"GeoIP lookup failed for {ip}: {e}")
+        country, city, lat, lon = fetch_geoip(ip)
 
         browser, os_name, device = None, None, None
         if user_agent and user_agent != "Unknown" and parse_user_agent:

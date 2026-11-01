@@ -54,6 +54,8 @@ cp frontend/.env.example frontend/.env
   FIREBASE_PROJECT_ID=link-shortener-6c96e
   ENABLE_LEGACY_AUTH=false
   TRUSTED_PROXY_COUNT=0
+  GEOIP_PROVIDER=ipwho
+  GEOIP_API_KEY=
   ```
   > [!IMPORTANT]
   > `JWT_SECRET` must be at least 32 characters long. The backend fails fast at startup if it is missing or shorter than 32 characters.

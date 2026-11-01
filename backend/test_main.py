@@ -1507,3 +1507,61 @@ def test_section4_account_password_100_characters():
         )
         assert res.status_code == 201
         assert "access_token" in res.json()
+
+
+def test_section5_geoip_https_provider_and_url_starts_with_https(monkeypatch):
+    """Asserts GeoIP requests use HTTPS providers, enforce 2s timeouts, support GEOIP_PROVIDER=none, and fail quietly."""
+    from unittest.mock import MagicMock, patch
+
+    import httpx
+
+    import main
+
+    captured_urls = []
+
+    def mock_get(url, *args, **kwargs):
+        captured_urls.append(url)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "success": True,
+            "country": "Germany",
+            "city": "Berlin",
+            "latitude": 52.52,
+            "longitude": 13.405,
+        }
+        return mock_resp
+
+    with patch.object(httpx.Client, "get", side_effect=mock_get):
+        # 1. Test ipwho default provider
+        monkeypatch.setenv("GEOIP_PROVIDER", "ipwho")
+        country, city, lat, lon = main.fetch_geoip("8.8.8.8")
+        assert country == "Germany"
+        assert city == "Berlin"
+        assert len(captured_urls) == 1
+        assert captured_urls[-1].startswith("https://")
+        assert "http://" not in captured_urls[-1]
+
+        # 2. Test ipapi provider
+        monkeypatch.setenv("GEOIP_PROVIDER", "ipapi")
+        monkeypatch.setenv("GEOIP_API_KEY", "test_key_123")
+        main.fetch_geoip("1.1.1.1")
+        assert len(captured_urls) == 2
+        assert captured_urls[-1].startswith("https://")
+        assert "key=test_key_123" in captured_urls[-1]
+
+        # 3. Test GEOIP_PROVIDER=none
+        monkeypatch.setenv("GEOIP_PROVIDER", "none")
+        res_none = main.fetch_geoip("8.8.8.8")
+        assert res_none == (None, None, None, None)
+        assert len(captured_urls) == 2  # No new network calls made
+
+    # 4. Test network failure fails quietly to None
+    def mock_fail(url, *args, **kwargs):
+        raise httpx.ConnectTimeout("Connection timed out after 2s")
+
+    with patch.object(httpx.Client, "get", side_effect=mock_fail):
+        monkeypatch.setenv("GEOIP_PROVIDER", "ipwho")
+        country, city, lat, lon = main.fetch_geoip("8.8.8.8")
+        assert country is None
+        assert city is None
