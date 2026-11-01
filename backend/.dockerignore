@@ -10,3 +10,10 @@ backend.log
 node_modules/
 package-lock.json
 package.json
+.env
+.env.*
+.git
+.gitignore
+tests/
+test_*.py
+*.md

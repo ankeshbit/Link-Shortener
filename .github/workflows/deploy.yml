@@ -18,7 +18,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Linting Tools
-        run: pip install black isort ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
       - name: Run Black Formatter Check
         run: black --check backend/
       - name: Run Isort Import Sorting Check
@@ -27,10 +29,23 @@ jobs:
         run: ruff check backend/
 
   backend-test:
-    name: Backend Pytest (Neon PostgreSQL & Redis)
+    name: Backend Pytest (PostgreSQL & Redis Services)
     runs-on: ubuntu-latest
     needs: code-quality-and-lint
     services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: bytelink
+          POSTGRES_PASSWORD: bytelink_ci_pass
+          POSTGRES_DB: bytelink
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
       redis:
         image: redis:7-alpine
         ports:
@@ -51,25 +66,25 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
-      - name: Run Pytest
+          pip install -r backend/requirements-dev.txt
+      - name: Run Database Migrations
         env:
-          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          DATABASE_URL: postgresql://bytelink:bytelink_ci_pass@localhost:5432/bytelink
+        run: |
+          cd backend && alembic upgrade head && alembic check
+      - name: Run Full Pytest Suite
+        env:
+          DATABASE_URL: postgresql://bytelink:bytelink_ci_pass@localhost:5432/bytelink
           REDIS_URL: redis://localhost:6379/0
-          JWT_SECRET: ${{ secrets.TEST_JWT_SECRET }}
-          ALGORITHM: HS256
-          ACCESS_TOKEN_EXPIRE_MINUTES: 60
-          REFRESH_TOKEN_EXPIRE_DAYS: 7
-        # The repository's integration tests intentionally reset their database.
-        # Keep CI non-destructive when using the shared Neon database.
-        run: >-
-          pytest backend/test_main.py
-          -k "health_check or root_endpoint or invalid_short_url_404 or
-          account_features_require_authentication or favicon_404 or
-          api_docs_reachable or user_registration_invalid_email"
+          JWT_SECRET: ci_test_secret_key_at_least_32_characters_long_abcdef123456
+          ALLOW_SHORT_JWT_SECRET: "false"
+          ENV: development
+          PUBLIC_BASE_URL: http://localhost:8000
+        run: |
+          pytest backend/test_main.py -v
 
   frontend-build:
-    name: Frontend Production Build
+    name: Frontend Lint & Production Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -82,6 +97,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install Dependencies
         run: npm ci --prefix frontend
+      - name: Lint Frontend Code
+        run: npm run lint --prefix frontend
       - name: Compile and Build
         run: npm run build --prefix frontend
 
@@ -93,9 +110,9 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       - name: Verify Backend Docker Build
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: ./backend
           file: ./backend/Dockerfile

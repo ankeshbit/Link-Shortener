@@ -13,12 +13,15 @@ if exist backend\.venv\Scripts\activate.bat (
 )
 
 echo [3/4] Running database migrations...
-python -m alembic -c backend\alembic.ini upgrade head
+cd /d "%~dp0backend"
+python -m alembic -c alembic.ini upgrade head
 if errorlevel 1 (
     echo Migration failed. Please ensure PostgreSQL is reachable.
+    cd /d "%~dp0"
     pause
     exit /b 1
 )
+cd /d "%~dp0"
 
 echo [4/4] Launching FastAPI backend and Vite frontend...
 start "ByteLink Backend (FastAPI)" cmd /k "cd /d %~dp0backend && python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000"

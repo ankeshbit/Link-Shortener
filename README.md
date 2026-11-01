@@ -1,36 +1,46 @@
 # ByteLink — Premium Full-Stack URL Shortener & Live Analytics
 
-ByteLink is a production-grade, full-stack URL Shortener application built with modern web technologies: React 19, Vite, FastAPI, PostgreSQL, Redis, and Firebase Authentication. It provides instantaneous link redirections, custom alias creations, password lock protections, user authentication dashboards, and real-time geographical analytics streaming via WebSockets.
+ByteLink is a production-grade, full-stack URL Shortener and click analytics application built with modern web technologies: React 19, Vite, FastAPI, PostgreSQL, Redis, and Firebase Authentication. It provides instantaneous link redirections, custom alias creations, password-protected short links, authenticated user dashboards, and real-time geographical and device analytics streaming via WebSockets.
 
 ---
 
-## Localhost-Only Development Setup (Windows PowerShell)
+## Architecture Overview
 
-Follow this complete step-by-step guide to run ByteLink 100% locally on Windows using PowerShell.
+| Component | Technology | Local URL | Description |
+|---|---|---|---|
+| **Frontend** | React 19 + Vite | `http://localhost:5173` | Responsive UI with real-time analytics, QR generator, and Google OAuth |
+| **Backend** | FastAPI + Uvicorn | `http://localhost:8000` | Asynchronous REST and WebSocket API with Pydantic validation |
+| **API Docs** | Swagger / OpenAPI | `http://localhost:8000/docs` | Interactive API documentation and schema explorer |
+| **Database** | PostgreSQL 15/16 | `127.0.0.1:5432` | Relational storage with SQLAlchemy 2.0 and Alembic schema migrations |
+| **Cache & Limiter** | Redis 7 | `127.0.0.1:6379` | Response caching, atomic Lua rate limiting, and analytics fallback |
+| **Authentication** | Firebase Auth | External | Google OAuth with public key cryptographic RS256 token verification |
+
+---
+
+## Local Development Setup (Windows / Linux / macOS)
 
 ### 1. Prerequisites
-Ensure the following tools are installed on your Windows machine:
-- **Python 3.10+** (verify with `python --version`)
-- **Node.js 18+ & npm** (verify with `node -v` and `npm -v`)
-- **Docker Desktop** (for local PostgreSQL and Redis containers, or running native PostgreSQL and Redis services)
-- **Git** (verify with `git --version`)
+Ensure the following tools are installed:
+- **Python 3.10+ / 3.11+** (`python --version`)
+- **Node.js 18+ / 20+ & npm** (`node -v` and `npm -v`)
+- **Docker & Docker Compose** (for local PostgreSQL and Redis containers, or running native services)
+- **Git** (`git --version`)
 
-### 2. Environment File Setup
+### 2. Environment Configuration
 Clone the repository and copy the environment configuration templates:
 
-```powershell
-# Navigate to repository root
-cd C:\path\to\Link-Shortener
+```bash
+# Backend environment setup
+cp backend/.env.example backend/.env
 
-# Copy backend environment template
-Copy-Item backend\.env.example backend\.env
-
-# Copy frontend environment template
-Copy-Item frontend\.env.example frontend\.env
+# Frontend environment setup
+cp frontend/.env.example frontend/.env
 ```
 
-Ensure `.env` files contain your local configuration:
-- In `backend\.env`:
+*(On Windows PowerShell, use `Copy-Item backend\.env.example backend\.env` and `Copy-Item frontend\.env.example frontend\.env`).*
+
+#### Key Configuration Variables
+- **`backend/.env`**:
   ```ini
   DATABASE_URL=postgresql://bytelink:bytelink@localhost:5432/bytelink
   PUBLIC_BASE_URL=http://localhost:8000
@@ -45,8 +55,11 @@ Ensure `.env` files contain your local configuration:
   ENABLE_LEGACY_AUTH=false
   TRUSTED_PROXY_COUNT=0
   ```
-  *(Note: `JWT_SECRET` must be at least 32 characters long. The backend fails fast at startup if it is missing or too short).*
-- In `frontend\.env`:
+  > [!IMPORTANT]
+  > `JWT_SECRET` must be at least 32 characters long. The backend fails fast at startup if it is missing or shorter than 32 characters.
+  > `ENABLE_LEGACY_AUTH` defaults to `false` for security (legacy password registration/login is disabled).
+
+- **`frontend/.env`**:
   ```ini
   VITE_API_URL=http://localhost:8000
   VITE_FIREBASE_API_KEY=AIzaSyAPeMM2qYyM4moGqcc5bSFjA7tMTJfWPCw
@@ -58,209 +71,115 @@ Ensure `.env` files contain your local configuration:
   VITE_FIREBASE_MEASUREMENT_ID=G-LMMSJ9NS4D
   ```
 
-### 3. Firebase Service-Account Setup (Optional & Dual-Mode)
-ByteLink supports dual-mode Firebase ID token verification:
-1. **Zero-Configuration Mode (Default):** The backend cryptographically validates tokens directly against Google's public x509 certificates matching `FIREBASE_PROJECT_ID`. No service account key is needed for local development!
-2. **Service Account Key Mode (Optional):** If you prefer Firebase Admin SDK initialization with service credentials:
-   - In the Firebase Console, go to **Project Settings → Service accounts → Generate new private key**.
-   - Copy the private key and client email into `backend\.env`:
-     ```ini
-     FIREBASE_CLIENT_EMAIL=firebase-adminsdk-xxxxx@link-shortener-6c96e.iam.gserviceaccount.com
-     FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-     ```
-   - Escaped `\n` characters are automatically parsed and normalized.
+### 3. Automated Local Startup
 
-### 4. Starting PostgreSQL and Redis
-Launch local PostgreSQL (port 5432) and Redis (port 6379) via Docker Compose:
+You can launch the entire stack (PostgreSQL, Redis, migrations, backend, and frontend) with a single command:
 
-```powershell
-docker compose up -d postgres redis
-```
-Verify the containers are healthy:
-```powershell
-docker compose ps
-```
-
-### 5. Creating and Activating Python Virtual Environment
-In the repository root:
-
-```powershell
-# Create virtual environment inside backend
-python -m venv backend\.venv
-
-# Activate virtual environment
-.\backend\.venv\Scripts\Activate.ps1
-```
-*(If PowerShell execution policies prevent script activation, run: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`)*
-
-### 6. Installing Backend Dependencies
-```powershell
-python -m pip install --upgrade pip
-pip install -r backend\requirements.txt
-```
-
-### 7. Running Database Migrations
-Apply Alembic migrations to create the database schema:
-
-```powershell
-python -m alembic -c backend\alembic.ini upgrade head
-```
-
-### 8. Starting FastAPI Backend
-Launch the FastAPI development server:
-
-```powershell
-python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
-```
-Verify:
-- API Root: `http://localhost:8000/`
-- API Health Check: `http://localhost:8000/health`
-- Swagger UI Documentation: `http://localhost:8000/docs`
-
-### 9. Installing Frontend Dependencies
-Open a second PowerShell window:
-
-```powershell
-cd frontend
-npm install
-```
-
-### 10. Starting Vite Frontend
-Start the Vite development server:
-
-```powershell
-npm run dev
-```
-Open `http://localhost:5173` in your browser.
-
-### 11. Testing Google Authentication
-1. On `http://localhost:5173`, click **Sign In with Google**.
-2. Complete the Google popup authentication.
-3. The app receives a Firebase ID token, stores it locally, and automatically calls `POST /api/auth/sync` on the local backend to synchronize your account in PostgreSQL.
-4. Your user profile will appear in the top navigation bar.
-
-### 12. Testing URL Creation
-1. In the hero input, enter any destination URL (e.g., `https://example.com/docs`).
-2. Optionally expand **Advanced Options** to enter a custom alias (e.g., `my-docs`), expiration date, or password lock.
-3. Click **Shorten URL**.
-4. The local backend stores the link in PostgreSQL, caches it in Redis, and returns `http://localhost:8000/<short_id>`.
-
-### 13. Testing Short URL Redirection
-1. Copy the generated short URL (e.g., `http://localhost:8000/my-docs`).
-2. Open a new browser tab or an Incognito window and paste the short link.
-3. The local backend resolves the link from Redis/PostgreSQL, records click metadata asynchronously, and immediately issues an HTTP 307 redirect to `https://example.com/docs`.
-4. Open the **Analytics Dashboard** on `http://localhost:5173/dashboard` to verify real-time click metrics and geolocation logs.
-
-### 14. Troubleshooting Common Errors
-- **Error: "Script execution is disabled on this system" in PowerShell:**
-  Run: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
-- **Error: "Path doesn't exist: alembic":**
-  Use the `-c` flag pointing to `backend\alembic.ini`:
-  `python -m alembic -c backend\alembic.ini upgrade head`
-- **Error: "Connection refused to localhost:5432":**
-  Ensure Docker Desktop is running and run `docker compose up -d postgres redis`.
-- **Error: "CORS error on API requests":**
-  Verify that `CORS_ALLOWED_ORIGINS` in `backend\.env` contains `http://localhost:5173,http://127.0.0.1:5173` and `VITE_API_URL` in `frontend\.env` is `http://localhost:8000`.
-- **Automated Startup Script:**
-  You can run all backend and frontend services with a single PowerShell script:
+- **Windows (PowerShell):**
   ```powershell
   .\start-local.ps1
   ```
+- **Windows (Command Prompt):**
+  ```cmd
+  start-local.bat
+  ```
+- **Linux / macOS (Bash):**
+  ```bash
+  chmod +x start-local.sh
+  ./start-local.sh
+  ```
+
+### 4. Manual Step-by-Step Setup
+
+If you prefer to start each component manually:
+
+#### A. Start Database & Cache
+```bash
+docker compose up -d postgres redis
+```
+
+#### B. Setup Backend & Run Migrations
+```bash
+cd backend
+python -m venv .venv
+
+# Windows:
+.\.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
+
+pip install -r requirements-dev.txt
+alembic upgrade head
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+#### C. Setup Frontend
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Open `http://localhost:5173` in your browser.
 
 ---
 
-## Features
+## Core Security & Reliability Features
 
-| Feature | Description |
-|---|---|
-| **User Accounts & Firebase Auth** | Secure Google login, Bearer token authorization, automatic token refreshing |
-| **Live Analytics Dashboard** | Track clicks, top countries, devices, and real-time logs via WebSockets |
-| **Advanced Shortening Options** | Custom aliases, link expiry timers, bcrypt-encrypted password protection |
-| **QR Code Generator** | Built-in canvas-rendered QR codes with PNG download |
-| **Caching & Rate Limiting** | High-speed Redis-backed caching with graceful fallback when Redis is restarting |
-| **Explicit CORS Configuration** | Localhost origins enabled in development, explicit origin whitelist in production |
-| **Professional API Landing** | Async `/` route returning health and endpoint metadata instead of a 404 |
-| **Robust Validation Errors** | Human-readable validation messages with detailed diagnostic logging |
+### 1. Robust Password Protection (bcrypt + SHA-256 Pre-hashing)
+Link password locks are hashed using `bcrypt`. To protect against bcrypt's native 72-byte truncation boundary, passwords are pre-hashed with SHA-256 before bcrypt digest generation. Legacy SHA-256 links are validated using constant-time comparisons (`hmac.compare_digest`) and automatically upgraded to bcrypt upon first successful unlock. Password unlock is strictly rate-limited to 5 attempts per minute per IP and short ID.
 
----
+### 2. Account Pre-Hijacking Prevention
+When a user signs in with Google, account linking to existing PostgreSQL user records requires `email_verified: True` in the verified Firebase ID token claims. Unverified emails reject linking with HTTP 401/409, preventing account takeover attacks.
 
-## Tech Stack
+### 3. Atomic Rate Limiting
+Rate limiting uses an atomic Redis Lua script (`INCR` + `EXPIRE`), preventing race conditions and key leakage without expiration. The rate limiter re-raises `HTTPException(429)` cleanly and fails open only when Redis infrastructure is unreachable.
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | React 19, Vite, Axios, Chart.js, Lucide Icons, Framer Motion |
-| **Backend** | FastAPI 0.137+, Python 3.10/3.11, Uvicorn, WebSockets, Background Tasks |
-| **Database** | PostgreSQL, SQLAlchemy 2.0 ORM, Alembic Migrations |
-| **Cache / Rate Limit** | Redis (local or cloud), SafeRedisClient fallback |
-| **Authentication** | Firebase Authentication (Google OAuth + RS256 JWTs) |
-| **Containerization** | Docker, Docker Compose |
-| **Testing** | Pytest, TestClient, AnyIO |
+### 4. Injection & XSS Protection
+- Custom aliases are validated against `^[A-Za-z0-9_-]{3,50}$` and reserved keywords (`api`, `docs`, `health`, etc.) are rejected.
+- Dynamic values rendered in server HTML templates and forms are escaped with `html.escape`.
+
+### 5. Non-Blocking WebSocket Authentication
+WebSocket connection for real-time analytics offloads token verification to thread pools without blocking the ASGI event loop. Authentication occurs via the first WebSocket message frame (`{"type": "auth", "token": "..."}`), preventing tokens from leaking in query parameters or server access logs.
+
+### 6. Data Integrity & Concurrency
+- `clicks_count` is updated atomically in SQL (`UPDATE urls SET clicks_count = clicks_count + 1 WHERE id = ...`) within the same database transaction that records the `ClickEvent`.
+- Database foreign keys specify `ondelete="CASCADE"`.
+- URL expiration timestamps are normalized to UTC with past expiration dates rejected at creation time.
+- Redis cache records carry an explicit TTL (24 hours or link expiration, whichever is sooner) and are purged immediately when a user deletes a link.
 
 ---
 
-## Folder Structure
+## Verification & Testing
 
-```text
-Link-Shortener/
-├── backend/
-│   ├── alembic/                # Database schema migration versions
-│   ├── alembic.ini             # Alembic configuration
-│   ├── main.py                 # FastAPI app — routes, middleware, CORS, error handlers
-│   ├── database.py             # SQLAlchemy engine & Session dependency
-│   ├── models.py               # ORM models for PostgreSQL
-│   ├── security.py             # Auth verification, Bearer extraction, bcrypt hashing
-│   ├── firebase_config.py      # Dual-mode Firebase token verification & cert cache
-│   ├── redis_client.py         # SafeRedisClient with graceful fallback
-│   ├── test_main.py            # Pytest test suite (32 tests)
-│   ├── requirements.txt        # Python dependency stack
-│   ├── Dockerfile              # Slim Python 3.11 Docker image
-│   └── .env.example            # Backend environment template
-├── frontend/
-│   ├── src/
-│   │   ├── api/
-│   │   │   └── axios.js        # Axios instance with Firebase ID token attach & 401 refresh
-│   │   ├── auth/
-│   │   │   ├── firebase.js     # Firebase client SDK initialization & Google OAuth
-│   │   │   └── AuthContext.jsx # React AuthContext provider
-│   │   ├── components/
-│   │   │   ├── ShortenerForm.jsx       # Shortener form, error handler, live preview
-│   │   │   ├── AnalyticsDashboard.jsx  # Click charts, geo logs, WebSocket live updates
-│   │   │   ├── Dashboard.jsx           # User links history management
-│   │   │   ├── SignIn.jsx              # Google sign-in modal/page
-│   │   │   └── ErrorBoundary.jsx       # React error boundary
-│   │   ├── App.jsx             # Route declarations & navigation bar
-│   │   └── index.css           # Design system & styles
-│   ├── package.json            # Frontend dependencies
-│   └── .env.example            # Frontend environment template
-├── docker-compose.yml          # Local PostgreSQL & Redis orchestration
-├── start-local.ps1             # One-click Windows PowerShell startup script
-├── start-local.bat             # One-click Windows batch startup script
-├── start-local.sh              # One-click Linux/macOS bash startup script
-└── README.md
+### Running the Backend Verification Suite
+Backend code formatting, linting, migration check, and all 54 pytest tests must pass:
+
+```bash
+cd backend
+black --check .
+isort --check-only .
+ruff check .
+pytest -q
+alembic check
+```
+
+### Running the Frontend Verification Suite
+Frontend linting and production build:
+
+```bash
+cd frontend
+npm ci
+npm run lint
+npm run build
 ```
 
 ---
 
-## Running Automated Tests
+## CI/CD Pipeline
 
-Run the full automated test suite (32 tests):
-
-```powershell
-.\backend\.venv\Scripts\python.exe -m pytest backend\test_main.py -v
-```
-
-Tests cover:
-- Health check and root endpoints
-- Firebase token authentication and user creation
-- Invalid, expired, and missing Firebase tokens (HTTP 401)
-- Authenticated URL shortening
-- Custom alias conflicts (HTTP 409)
-- Target URL validation (HTTP 422)
-- PostgreSQL insertion failure handling (HTTP 500)
-- Redis cache unavailability resilience
-- Public short URL redirection (HTTP 307)
-- Password-protected short link verification
-- Expiration handling (HTTP 410 / expired message)
-- Cross-origin CORS preflight headers for localhost
-- Cross-session database persistence verification
-- Public certificate cryptographic signature validation
+The GitHub Actions workflow (`.github/workflows/deploy.yml`) validates every push and pull request to `main`:
+1. **Code Formatting & Lint Check**: Validates formatting with `black`, import ordering with `isort`, and code style with `ruff`.
+2. **Backend Pytest**: Spins up isolated containerized services (`postgres:15-alpine` and `redis:7-alpine`), runs `alembic upgrade head` and `alembic check`, and runs all 54 pytest unit and integration tests.
+3. **Frontend Lint & Build**: Runs `npm run lint` and `npm run build` using Node.js 22.
+4. **Docker Image Build Validation**: Validates that `backend/Dockerfile` builds cleanly using a non-root user (`appuser`).

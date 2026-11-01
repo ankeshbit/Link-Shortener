@@ -14,17 +14,28 @@ if [ ! -f "$backend_python" ]; then
 fi
 
 echo "[2/4] Running database migrations..."
-"$backend_python" -m alembic -c backend/alembic.ini upgrade head
+(cd backend && "$backend_python" -m alembic -c alembic.ini upgrade head)
 
 echo "[3/4] Starting FastAPI backend on http://127.0.0.1:8000..."
-"$backend_python" -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000 &
+(cd backend && "$backend_python" -m uvicorn main:app --reload --host 127.0.0.1 --port 8000) &
 backend_pid=$!
 
 echo "[4/4] Starting Vite frontend on http://localhost:5173..."
 (cd frontend && npm run dev) &
 frontend_pid=$!
 
-trap 'kill "$backend_pid" "$frontend_pid"' EXIT INT TERM
+cleanup() {
+    echo ""
+    echo "Shutting down ByteLink services..."
+    kill "$backend_pid" "$frontend_pid" 2>/dev/null || true
+    pkill -P "$backend_pid" 2>/dev/null || true
+    pkill -P "$frontend_pid" 2>/dev/null || true
+    wait "$backend_pid" 2>/dev/null || true
+    wait "$frontend_pid" 2>/dev/null || true
+    echo "All local services stopped cleanly."
+}
+trap cleanup EXIT INT TERM
+
 echo "======================================================="
 echo "ByteLink is running locally:"
 echo "  Frontend: http://localhost:5173"

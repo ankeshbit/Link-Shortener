@@ -60,11 +60,35 @@ def register_token(prefix="testuser"):
     return security.create_access_token(data={"sub": str(user_id)})
 
 
-# Safely skip drop_all to preserve database records and URL ownership
-@pytest.fixture(autouse=True)
+# Clean up test records without dropping tables
+@pytest.fixture(scope="session", autouse=True)
 def clean_db():
-    # Production/Neon protection: Do not drop tables
     yield
+    try:
+        import models
+        from database import SessionLocal
+
+        with SessionLocal() as db:
+            test_users = (
+                db.query(models.User)
+                .filter(
+                    (models.User.email.like("%@bytelink.co"))
+                    | (models.User.email.like("testuser%"))
+                )
+                .all()
+            )
+            for u in test_users:
+                db.delete(u)
+            test_urls = (
+                db.query(models.URL)
+                .filter(models.URL.original_url.like("%example.com%"))
+                .all()
+            )
+            for url in test_urls:
+                db.delete(url)
+            db.commit()
+    except Exception:
+        pass
 
 
 def test_health_check():

@@ -137,10 +137,13 @@ Write-Host "  Backend dependencies verified." -ForegroundColor Green
 # 5. Run Alembic Database Migrations
 Write-Host "`n[5/7] Running Alembic database migrations..." -ForegroundColor Yellow
 try {
-    $AlembicIni = Join-Path $PSScriptRoot "backend\alembic.ini"
-    & $VenvPython -m alembic -c $AlembicIni upgrade head
+    $BackendDir = Join-Path $PSScriptRoot "backend"
+    Push-Location $BackendDir
+    & $VenvPython -m alembic -c alembic.ini upgrade head
+    Pop-Location
     Write-Host "  Database schema migrations applied successfully." -ForegroundColor Green
 } catch {
+    Pop-Location -ErrorAction SilentlyContinue
     Write-Error "Alembic migration failed: $_. Verify DATABASE_URL in backend\.env."
     exit 1
 }
