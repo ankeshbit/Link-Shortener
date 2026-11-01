@@ -13,6 +13,9 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 import httpx
+import models
+import security
+from database import SessionLocal, engine, get_db
 from dotenv import load_dotenv
 from fastapi import (
     BackgroundTasks,
@@ -29,19 +32,15 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from firebase_config import initialize_firebase
 from loguru import logger
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
+from redis_client import redis_cache
 from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
-
-import models
-import security
-from database import SessionLocal, engine, get_db
-from firebase_config import initialize_firebase
-from redis_client import redis_cache
 
 try:
     from user_agents import parse as parse_user_agent

@@ -5,12 +5,12 @@ import urllib.request
 from typing import Any, Optional
 
 import firebase_admin
+import jwt
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
 from firebase_admin import auth, credentials
-import jwt
 from loguru import logger
 
 load_dotenv()

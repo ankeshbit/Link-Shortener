@@ -906,11 +906,10 @@ def test_phase1_jwt_secret_enforcement(monkeypatch):
 
 def test_phase1_account_prehijacking_unverified_rejected():
     """2. Refuses to link unverified identity provider account to existing user (409 Conflict)."""
-    from fastapi import HTTPException
-
     import models
     import security
     from database import SessionLocal
+    from fastapi import HTTPException
 
     email = f"victim_{os.urandom(4).hex()}@bytelink.co"
     with SessionLocal() as db:
@@ -1009,7 +1008,6 @@ def test_phase1_stored_xss_html_escaped():
 def test_phase1_rate_limiting_atomic_and_reraises():
     """4. Rate limiting uses atomic increment, re-raises HTTPException, and throttles unlock."""
     from fastapi import HTTPException
-
     from main import check_rate_limit
 
     test_key = f"rate_limit:test_atomic:{os.urandom(4).hex()}"
@@ -1046,9 +1044,8 @@ def test_phase1_rate_limiting_atomic_and_reraises():
 
 def test_phase1_trusted_proxy_count_client_ip(monkeypatch):
     """5. get_client_ip stops trusting X-Forwarded-For blindly unless TRUSTED_PROXY_COUNT > 0."""
-    from starlette.requests import Request
-
     import main
+    from starlette.requests import Request
 
     class DummyClient:
         host = "192.168.1.50"
@@ -1364,9 +1361,6 @@ def test_section3_geoip_never_calls_network_for_private_or_loopback_ips():
     from unittest.mock import patch
 
     import httpx
-
-    from database import SessionLocal
-    import models
     from main import is_public_ip, track_click
 
     private_and_loopback_ips = [
@@ -1400,9 +1394,8 @@ def test_section3_geoip_never_calls_network_for_private_or_loopback_ips():
 
 def test_section3_database_indexes_exist():
     """Asserts indexes on click_events.url_id, urls.user_id, and composite (urls.user_id, created_at) exist."""
-    from sqlalchemy import inspect
-
     from database import engine
+    from sqlalchemy import inspect
 
     inspector = inspect(engine)
 
@@ -1423,8 +1416,8 @@ def test_section3_database_indexes_exist():
 
 def test_section3_foreign_key_ondelete_cascade():
     """Asserts that deleting a User cascades to delete their associated URLs and ClickEvents."""
-    from database import SessionLocal
     import models
+    from database import SessionLocal
 
     with SessionLocal() as db:
         user = models.User(
@@ -1514,7 +1507,6 @@ def test_section5_geoip_https_provider_and_url_starts_with_https(monkeypatch):
     from unittest.mock import MagicMock, patch
 
     import httpx
-
     import main
 
     captured_urls = []

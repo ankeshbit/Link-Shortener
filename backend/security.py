@@ -6,16 +6,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
+import jwt
+import models
+from database import get_db
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-import jwt
+from firebase_config import verify_firebase_id_token
 from loguru import logger
 from sqlalchemy.orm import Session
-
-import models
-from database import get_db
-from firebase_config import verify_firebase_id_token
 
 load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
