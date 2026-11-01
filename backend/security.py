@@ -9,7 +9,7 @@ import bcrypt
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+import jwt
 from loguru import logger
 from sqlalchemy.orm import Session
 
@@ -133,7 +133,7 @@ def decode_access_token(token: str) -> dict | None:
         if payload.get("type") != "access":
             return None
         return payload
-    except JWTError:
+    except jwt.PyJWTError:
         return None
 
 
@@ -147,7 +147,7 @@ def decode_refresh_token(token: str) -> dict | None:
         if payload.get("type") != "refresh":
             return None
         return payload
-    except JWTError:
+    except jwt.PyJWTError:
         return None
 
 

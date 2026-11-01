@@ -10,7 +10,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from dotenv import load_dotenv
 from firebase_admin import auth, credentials
-from jose import JWTError, jwt
+import jwt
 from loguru import logger
 
 load_dotenv()
@@ -274,12 +274,12 @@ def verify_firebase_token_with_public_keys(
     except jwt.ExpiredSignatureError:
         logger.warning("Firebase ID token verification failed: token is expired.")
         return None
-    except jwt.JWTClaimsError as e:
+    except jwt.InvalidClaimError as e:
         logger.warning(
             f"Firebase ID token claims verification failed: {e}. Configured project_id='{project_id}'."
         )
         return None
-    except JWTError as e:
+    except jwt.PyJWTError as e:
         logger.warning(f"Firebase ID token signature verification failed: {e}.")
         return None
     except Exception as e:
