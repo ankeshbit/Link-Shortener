@@ -7,7 +7,7 @@ import {
   LineElement, Title, Tooltip, Legend, Filler 
 } from 'chart.js';
 import { Bar } from 'react-chartjs-2';
-import { ArrowLeft, MapPin, Clock, Info } from 'lucide-react';
+import { ArrowLeft, MapPin, Clock, Info, AlertCircle } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 
 ChartJS.register(
@@ -19,34 +19,79 @@ const AnalyticsDashboard = () => {
   const { id } = useParams();
   const [stats, setStats] = useState(null);
   const [error, setError] = useState('');
+  const [pollError, setPollError] = useState('');
   const [isLive, setIsLive] = useState(false);
 
   useEffect(() => {
+    // Reset state when id changes
+    setStats(null);
+    setError('');
+    setPollError('');
+    setIsLive(false);
+
     let ws = null;
     let fallbackInterval = null;
     let reconnectTimeout = null;
     let isMounted = true;
+    let isTerminal = false;
+
+    const stopAll = () => {
+      isTerminal = true;
+      if (fallbackInterval) {
+        clearInterval(fallbackInterval);
+        fallbackInterval = null;
+      }
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close();
+        ws = null;
+      }
+    };
 
     const fetchStats = async () => {
+      if (!isMounted || isTerminal) return;
       try {
         const res = await api.get(`/api/stats/${id}`);
-        if (isMounted) {
+        if (isMounted && !isTerminal) {
           setStats(res.data);
           setError('');
+          setPollError('');
         }
       } catch (err) {
-        if (isMounted) {
-          if (err.response?.status === 404) {
-            setError('This short link does not exist or you do not have permission to view its stats.');
-          } else {
-            setError('Error fetching stats. Please verify your connection.');
-          }
+        if (!isMounted) return;
+        const status = err.response?.status;
+        if (status === 404 || status === 403) {
+          stopAll();
+          setError(
+            status === 404
+              ? 'This short link does not exist.'
+              : 'You do not have permission to view stats for this link.'
+          );
+          setStats(null);
+          return;
         }
+
+        // Non-terminal error: If stats already present, keep them visible with banner
+        setStats((prevStats) => {
+          if (prevStats) {
+            setPollError('Unable to refresh live stats. Showing cached metrics.');
+            return prevStats;
+          }
+          setError('Error fetching stats. Please verify your connection.');
+          return null;
+        });
       }
     };
 
     const connectWS = async () => {
-      if (!isMounted) return;
+      if (!isMounted || isTerminal) return;
 
       let token = '';
       try {
@@ -68,8 +113,10 @@ const AnalyticsDashboard = () => {
         ws = new WebSocket(wsURL);
 
         ws.onopen = () => {
-          if (!isMounted) return;
-          // Authenticate via initial frame
+          if (!isMounted || isTerminal) {
+            if (ws) ws.close();
+            return;
+          }
           ws.send(JSON.stringify({ type: 'auth', token }));
           setIsLive(true);
           if (fallbackInterval) {
@@ -81,8 +128,9 @@ const AnalyticsDashboard = () => {
         ws.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data);
-            if (isMounted && (message.type === 'initial_stats' || message.type === 'click_update')) {
+            if (isMounted && !isTerminal && (message.type === 'initial_stats' || message.type === 'click_update')) {
               setStats(message.data);
+              setPollError('');
             }
           } catch (e) {
             console.error('Failed to parse websocket message', e);
@@ -94,22 +142,23 @@ const AnalyticsDashboard = () => {
         };
 
         ws.onclose = () => {
-          if (!isMounted) return;
+          if (!isMounted || isTerminal) return;
           setIsLive(false);
 
-          // Re-establish HTTP polling fallback
-          if (!fallbackInterval) {
+          // Re-establish HTTP polling fallback if not terminal
+          if (!fallbackInterval && !isTerminal) {
             fetchStats();
             fallbackInterval = setInterval(fetchStats, 5000);
           }
 
-          // Schedule reconnection attempt
           if (reconnectTimeout) clearTimeout(reconnectTimeout);
-          reconnectTimeout = setTimeout(connectWS, 6000);
+          if (!isTerminal) {
+            reconnectTimeout = setTimeout(connectWS, 6000);
+          }
         };
       } catch (e) {
         console.error('Websocket initialization error', e);
-        if (isMounted) {
+        if (isMounted && !isTerminal) {
           setIsLive(false);
           if (!fallbackInterval) {
             fetchStats();
@@ -125,15 +174,7 @@ const AnalyticsDashboard = () => {
 
     return () => {
       isMounted = false;
-      if (ws) {
-        ws.onopen = null;
-        ws.onmessage = null;
-        ws.onerror = null;
-        ws.onclose = null;
-        ws.close();
-      }
-      if (fallbackInterval) clearInterval(fallbackInterval);
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      stopAll();
     };
   }, [id]);
 
@@ -222,6 +263,27 @@ const AnalyticsDashboard = () => {
         </p>
       </div>
 
+      {pollError && (
+        <div
+          role="alert"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.3)',
+            borderRadius: '10px',
+            padding: '10px 14px',
+            color: '#fbbf24',
+            fontSize: '14px',
+            marginBottom: '1.5rem',
+          }}
+        >
+          <AlertCircle size={16} style={{ flexShrink: 0 }} />
+          <span>{pollError}</span>
+        </div>
+      )}
+
       <div className="stats-grid-main">
         <div className="stats-card-main">
           <div className="stats-card-main-title">Total Clicks</div>
@@ -230,7 +292,7 @@ const AnalyticsDashboard = () => {
 
         <div className="stats-chart-card">
           <h3 className="stats-chart-title">Geographic Distribution</h3>
-          <div className="chart-container">
+          <div className="chart-container" style={{ height: '320px', position: 'relative', width: '100%' }}>
             <Bar data={chartData} options={chartOptions} />
           </div>
         </div>

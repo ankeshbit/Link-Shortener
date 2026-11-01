@@ -1357,3 +1357,129 @@ def test_phase2_user_agent_device_detection():
         assert last_event.device == "Mobile"
         assert "Safari" in (last_event.browser or "")
         assert "iOS" in (last_event.os or "")
+
+
+def test_section3_geoip_never_calls_network_for_private_or_loopback_ips():
+    """Asserts GeoIP never initiates network calls for private, loopback, or IPv6-loopback IPs."""
+    from unittest.mock import patch
+
+    import httpx
+
+    from database import SessionLocal
+    import models
+    from main import is_public_ip, track_click
+
+    private_and_loopback_ips = [
+        "127.0.0.1",
+        "10.0.0.1",
+        "192.168.1.1",
+        "172.16.0.1",
+        "::1",
+        "fe80::1",
+    ]
+
+    for ip in private_and_loopback_ips:
+        assert is_public_ip(ip) is False
+
+    # Create a link and call track_click with each IP
+    token = register_token()
+    alias = f"geoip_{os.urandom(3).hex()}"
+    create_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/geoip-test", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert create_res.status_code == 200
+
+    with patch.object(httpx.AsyncClient, "get") as mock_get:
+        for ip in private_and_loopback_ips:
+            track_click(alias, "Mozilla/5.0", ip)
+        # Verify network was NEVER called
+        assert mock_get.call_count == 0
+
+
+def test_section3_database_indexes_exist():
+    """Asserts indexes on click_events.url_id, urls.user_id, and composite (urls.user_id, created_at) exist."""
+    from sqlalchemy import inspect
+
+    from database import engine
+
+    inspector = inspect(engine)
+
+    # 1. Indexes on urls table
+    urls_indexes = inspector.get_indexes("urls")
+    user_id_index = any("user_id" in idx["column_names"] for idx in urls_indexes)
+    composite_index = any(
+        idx["column_names"] == ["user_id", "created_at"] for idx in urls_indexes
+    )
+    assert user_id_index, "Index on urls.user_id must exist"
+    assert composite_index, "Composite index on (urls.user_id, created_at) must exist"
+
+    # 2. Indexes on click_events table
+    click_indexes = inspector.get_indexes("click_events")
+    url_id_index = any("url_id" in idx["column_names"] for idx in click_indexes)
+    assert url_id_index, "Index on click_events.url_id must exist"
+
+
+def test_section3_foreign_key_ondelete_cascade():
+    """Asserts that deleting a User cascades to delete their associated URLs and ClickEvents."""
+    from database import SessionLocal
+    import models
+
+    with SessionLocal() as db:
+        user = models.User(
+            email=f"cascade_{os.urandom(4).hex()}@bytelink.co",
+            firebase_uid=f"cascade_uid_{os.urandom(6).hex()}",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        user_id = user.id
+
+        url = models.URL(
+            target_url="https://example.com/cascade-target",
+            short_id=f"casc_{os.urandom(3).hex()}",
+            user_id=user_id,
+        )
+        db.add(url)
+        db.commit()
+        db.refresh(url)
+        url_id = url.id
+
+        click = models.ClickEvent(
+            url_id=url_id,
+            ip_address="127.0.0.1",
+            device="Desktop",
+        )
+        db.add(click)
+        db.commit()
+        db.refresh(click)
+        click_id = click.id
+
+        # Delete user
+        db.delete(user)
+        db.commit()
+
+        # Verify cascading deletion of URL and ClickEvent
+        assert db.query(models.URL).filter(models.URL.id == url_id).first() is None
+        assert (
+            db.query(models.ClickEvent).filter(models.ClickEvent.id == click_id).first()
+            is None
+        )
+
+
+def test_section3_starlette_404_and_405_return_standard_shape():
+    """Asserts Starlette 404 and 405 errors return the unified {"status": "error", "message": ...} shape."""
+    # 404 Not Found on completely unmapped route
+    res_404 = client.get("/api/completely/unmapped/route")
+    assert res_404.status_code == 404
+    data_404 = res_404.json()
+    assert data_404.get("status") == "error"
+    assert "message" in data_404
+
+    # 405 Method Not Allowed (DELETE to GET-only /health route)
+    res_405 = client.delete("/health")
+    assert res_405.status_code == 405
+    data_405 = res_405.json()
+    assert data_405.get("status") == "error"
+    assert "message" in data_405

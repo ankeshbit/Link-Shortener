@@ -99,6 +99,8 @@ jobs:
         run: npm ci --prefix frontend
       - name: Lint Frontend Code
         run: npm run lint --prefix frontend
+      - name: Run Frontend Tests (Vitest)
+        run: npm test --prefix frontend
       - name: Compile and Build
         run: npm run build --prefix frontend
 
