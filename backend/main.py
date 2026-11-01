@@ -29,6 +29,7 @@ from fastapi import (
     status,
 )
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from loguru import logger
@@ -40,6 +41,7 @@ from sqlalchemy.orm import Session
 
 # Load environment variables
 load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Active event loop capture for WebSockets broadcast from background tasks
 loop = None
@@ -117,12 +119,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logger.error(
         f"Validation error on {request.method} {request.url.path}: {exc.errors()}"
     )
+    raw_errors = jsonable_encoder(exc.errors())
+    first_msg = raw_errors[0].get("msg", "Validation failed") if raw_errors else "Validation failed"
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "status": "error",
-            "message": "Validation failed",
-            "errors": exc.errors(),
+            "message": first_msg,
+            "detail": raw_errors,
+            "errors": raw_errors,
         },
     )
 
@@ -130,12 +135,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(ValidationError)
 async def pydantic_validation_exception_handler(request: Request, exc: ValidationError):
     logger.error(f"Pydantic Validation error: {exc.errors()}")
+    raw_errors = jsonable_encoder(exc.errors())
+    first_msg = raw_errors[0].get("msg", "Validation failed") if raw_errors else "Validation failed"
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={
             "status": "error",
-            "message": "Validation failed",
-            "errors": exc.errors(),
+            "message": first_msg,
+            "detail": raw_errors,
+            "errors": raw_errors,
         },
     )
 
@@ -146,7 +154,13 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         f"HTTP exception on {request.method} {request.url.path}: {exc.status_code} - {exc.detail}"
     )
     return JSONResponse(
-        status_code=exc.status_code, content={"status": "error", "message": exc.detail}
+        status_code=exc.status_code,
+        content={
+            "status": "error",
+            "message": exc.detail,
+            "detail": exc.detail,
+        },
+        headers=getattr(exc, "headers", None) or {},
     )
 
 
@@ -155,11 +169,13 @@ async def integrity_exception_handler(request: Request, exc: IntegrityError):
     logger.error(
         f"Database integrity error on {request.method} {request.url.path}: {exc}"
     )
+    msg = "Alias already in use. Please select another alias." if "urls_short_id" in str(exc).lower() else "Database conflict: Integrity constraint violated."
     return JSONResponse(
         status_code=status.HTTP_409_CONFLICT,
         content={
             "status": "error",
-            "message": "Database conflict: Integrity constraint violated.",
+            "message": msg,
+            "detail": msg,
         },
     )
 
@@ -169,11 +185,13 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
     logger.exception(
         f"SQLAlchemy query error on {request.method} {request.url.path}: {exc}"
     )
+    msg = "A database error occurred while processing your request."
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "status": "error",
-            "message": "A database error occurred while processing your request.",
+            "message": msg,
+            "detail": msg,
         },
     )
 
@@ -183,11 +201,13 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.exception(
         f"Unhandled exception on {request.method} {request.url.path}: {exc}"
     )
+    msg = "An unexpected error occurred. Please try again later."
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
             "status": "error",
-            "message": "An unexpected error occurred. Please try again later.",
+            "message": msg,
+            "detail": msg,
         },
     )
 
@@ -198,9 +218,11 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 if not PUBLIC_BASE_URL and ENVIRONMENT != "production":
     PUBLIC_BASE_URL = os.getenv("BASE_URL")
 if not PUBLIC_BASE_URL:
-    raise RuntimeError(
-        "PUBLIC_BASE_URL environment variable is required in production."
-    )
+    if ENVIRONMENT == "production":
+        raise RuntimeError(
+            "PUBLIC_BASE_URL environment variable is required in production."
+        )
+    PUBLIC_BASE_URL = "http://localhost:8000"
 PUBLIC_BASE_URL = PUBLIC_BASE_URL.rstrip("/")
 parsed_public_url = urlsplit(PUBLIC_BASE_URL)
 if parsed_public_url.scheme not in {"http", "https"} or not parsed_public_url.netloc:
@@ -209,11 +231,12 @@ if ENVIRONMENT == "production" and parsed_public_url.scheme != "https":
     raise RuntimeError("PUBLIC_BASE_URL must use HTTPS in production.")
 
 # Build the list of allowed origins.
-origins = ["https://link-shortener-mauve-pi.vercel.app"]
-if ENVIRONMENT != "production":
-    origins.extend(["http://localhost:5173", "http://127.0.0.1:5173"])
-    if parsed_public_url.hostname:
-        origins.append(f"http://{parsed_public_url.hostname}:5173")
+origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+if ENVIRONMENT == "production":
+    origins.append("https://link-shortener-mauve-pi.vercel.app")
+elif parsed_public_url.hostname:
+    origins.append(f"http://{parsed_public_url.hostname}:5173")
+if PUBLIC_BASE_URL not in origins:
     origins.append(PUBLIC_BASE_URL)
 
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
@@ -225,7 +248,7 @@ for url in CORS_ALLOWED_ORIGINS.split(","):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_origin_regex=r"^https://.*\.vercel\.app$",
+    allow_origin_regex=r"^https://.*\.vercel\.app$" if ENVIRONMENT == "production" else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -335,6 +358,8 @@ def rate_limit(request: Request):
                 status_code=429,
                 detail="Too many requests. Rate limit is 20 requests per minute.",
             )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"Rate limiting check failed: {e}")
     return True
@@ -640,16 +665,28 @@ def create_short_url(
     # Secure password if provided
     hashed_pwd = security.hash_link_password(item.password) if item.password else None
 
-    new_url = models.URL(
-        short_id=short_id,
-        target_url=target_url_str,
-        expires_at=item.expires_at,
-        password=hashed_pwd,
-        user_id=current_user_id,
-    )
-    db.add(new_url)
-    db.commit()
-    db.refresh(new_url)
+    try:
+        new_url = models.URL(
+            short_id=short_id,
+            target_url=target_url_str,
+            expires_at=item.expires_at,
+            password=hashed_pwd,
+            user_id=current_user_id,
+        )
+        db.add(new_url)
+        db.commit()
+        db.refresh(new_url)
+    except IntegrityError as exc:
+        db.rollback()
+        logger.warning(f"Conflict on short link creation: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Alias already in use. Please select another alias.",
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.error(f"Database error on short link creation: {exc}")
+        raise
     logger.info(
         f"Short link created: {short_id} -> {target_url_str} (User: {current_user_id})"
     )
@@ -748,16 +785,16 @@ def redirect_url(
             logger.warning(f"Could not update cache: {e}")
 
     # Expiry verification
-    if expires_at and datetime.now(timezone.utc) > expires_at.replace(
-        tzinfo=timezone.utc
-    ):
-        logger.info(f"Access attempt to expired link: {short_id}")
-        return HTMLResponse(
-            get_html_template(
-                "Link Expired",
-                "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+    if expires_at:
+        exp_utc = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp_utc:
+            logger.info(f"Access attempt to expired link: {short_id}")
+            return HTMLResponse(
+                get_html_template(
+                    "Link Expired",
+                    "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                )
             )
-        )
 
     # Render unlock page if password is set
     if password:
@@ -791,15 +828,15 @@ def verify_password_and_redirect(
         raise HTTPException(status_code=404, detail="URL not found")
 
     # Expiry verification
-    if url.expires_at and datetime.now(timezone.utc) > url.expires_at.replace(
-        tzinfo=timezone.utc
-    ):
-        return HTMLResponse(
-            get_html_template(
-                "Link Expired",
-                "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+    if url.expires_at:
+        exp_utc = url.expires_at if url.expires_at.tzinfo else url.expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp_utc:
+            return HTMLResponse(
+                get_html_template(
+                    "Link Expired",
+                    "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                )
             )
-        )
 
     # Password check
     if url.password and not security.verify_link_password(password, url.password):

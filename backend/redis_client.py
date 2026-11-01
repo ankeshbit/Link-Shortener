@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 try:
     import redis
@@ -32,16 +33,34 @@ class SafeRedisClient:
             return
 
         try:
+            # Try RESP2 protocol explicitly for maximum compatibility across Redis 5, 6, 7 & 8
             self.client = redis.from_url(
                 self.redis_url,
                 decode_responses=True,
-                socket_connect_timeout=0.5,
-                socket_timeout=0.5,
+                socket_connect_timeout=1.0,
+                socket_timeout=1.0,
                 retry_on_timeout=False,
+                protocol=2,
             )
-            # Verify connectivity
             self.client.ping()
-            logger.info("Connected to Redis server successfully.")
+            logger.info("Connected to Redis server successfully (RESP2 protocol).")
+        except TypeError:
+            # Fallback for older redis-py versions that do not accept protocol argument
+            try:
+                self.client = redis.from_url(
+                    self.redis_url,
+                    decode_responses=True,
+                    socket_connect_timeout=1.0,
+                    socket_timeout=1.0,
+                    retry_on_timeout=False,
+                )
+                self.client.ping()
+                logger.info("Connected to Redis server successfully.")
+            except Exception as e:
+                logger.warning(
+                    f"Could not connect to configured Redis ({e}). Redis features are disabled."
+                )
+                self.client = None
         except Exception as e:
             logger.warning(
                 f"Could not connect to configured Redis ({e}). Redis features are disabled."
@@ -92,7 +111,7 @@ class SafeRedisClient:
             self._init_client()
         if self.client:
             try:
-                return self.client.ping()
+                return bool(self.client.ping())
             except Exception:
                 self.client = None
                 return False

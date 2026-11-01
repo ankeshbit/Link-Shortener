@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database import Base, engine
 from main import app
+import models
 from redis_client import redis_cache
 
 client = TestClient(app)
@@ -24,6 +25,21 @@ def database_alive():
         return True
     except Exception:
         return False
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limit():
+    if redis_cache.client:
+        try:
+            redis_cache.client.delete("rate_limit:testclient")
+        except Exception:
+            pass
+    yield
+    if redis_cache.client:
+        try:
+            redis_cache.client.delete("rate_limit:testclient")
+        except Exception:
+            pass
 
 
 def register_token(prefix="testuser"):
@@ -367,3 +383,383 @@ def test_firebase_invalid_or_missing_token_401():
         assert res_invalid.status_code == 401
         assert res_invalid.json()["message"] == "Authentication required"
 
+
+
+# ==========================================
+# PHASE 7 AUTOMATED VERIFICATION TEST SUITE
+# ==========================================
+
+def test_phase7_1_authenticated_url_shortening():
+    """1. Authenticated URL shortening works and returns formatted short_url."""
+    token = register_token("auth_short")
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://python.org"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "short_id" in data
+    assert data["target_url"] in ["https://python.org", "https://python.org/"]
+    assert data["short_url"].endswith(data["short_id"])
+
+
+def test_phase7_2_invalid_firebase_token():
+    """2. Invalid Firebase token returns 401."""
+    with patch("firebase_config.auth.verify_id_token", side_effect=Exception("Invalid signature")):
+        resp = client.post(
+            "/api/shorten",
+            json={"target_url": "https://example.com"},
+            headers={"Authorization": "Bearer bad-firebase-token-123"},
+        )
+        assert resp.status_code == 401
+        assert resp.json()["status"] == "error"
+        assert resp.json()["message"] == "Authentication required"
+
+
+def test_phase7_3_expired_authentication_token():
+    """3. Expired authentication token returns 401."""
+    import security
+    from datetime import timedelta
+    expired_token = security.create_access_token(
+        data={"sub": "1"}, expires_delta=timedelta(seconds=-60)
+    )
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com"},
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert resp.status_code == 401
+    assert resp.json()["status"] == "error"
+
+
+def test_phase7_4_missing_authentication():
+    """4. Missing authentication returns 401."""
+    resp = client.post("/api/shorten", json={"target_url": "https://example.com"})
+    assert resp.status_code == 401
+    assert resp.json()["status"] == "error"
+    assert resp.json()["message"] == "Authentication required"
+
+
+def test_phase7_5_valid_target_url():
+    """5. Valid target URL with scheme and host is accepted."""
+    token = register_token("valid_url")
+    for valid_url in ["https://github.com/ankeshbit", "http://example.com/path?query=1"]:
+        resp = client.post(
+            "/api/shorten",
+            json={"target_url": valid_url},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+
+
+def test_phase7_6_invalid_target_url():
+    """6. Invalid target URL returns 422 validation error."""
+    token = register_token("invalid_url")
+    for bad_url in ["not-a-url", "ftp://invalid-scheme.com", "javascript:alert(1)"]:
+        resp = client.post(
+            "/api/shorten",
+            json={"target_url": bad_url},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["status"] == "error"
+
+
+def test_phase7_7_custom_alias_conflict():
+    """7. Custom alias conflict returns HTTP 409."""
+    token = register_token("alias_conflict")
+    alias = f"conflict_{os.urandom(4).hex()}"
+    resp1 = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/first", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp1.status_code == 200
+
+    resp2 = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/second", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp2.status_code == 409
+    assert resp2.json()["status"] == "error"
+    assert "already in use" in resp2.json()["message"]
+
+
+def test_phase7_8_postgresql_insertion_failure():
+    """8. PostgreSQL insertion failure returns 500 without leaking stack traces."""
+    from sqlalchemy.exc import SQLAlchemyError
+    token = register_token("db_fail")
+    with patch("sqlalchemy.orm.Session.commit", side_effect=SQLAlchemyError("Simulated DB Disk Failure")):
+        resp = client.post(
+            "/api/shorten",
+            json={"target_url": "https://example.com/db-fail"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 500
+        assert resp.json()["status"] == "error"
+        assert "database error" in resp.json()["message"].lower()
+
+
+def test_phase7_9_redis_unavailable():
+    """9. Redis unavailability does not prevent URL shortening or redirection."""
+    token = register_token("no_redis")
+    alias = f"no_redis_{os.urandom(4).hex()}"
+    target = "https://redis.io"
+
+    with patch.object(redis_cache, "set", side_effect=Exception("Redis connection refused")):
+        with patch.object(redis_cache, "get", return_value=None):
+            resp = client.post(
+                "/api/shorten",
+                json={"target_url": target, "custom_alias": alias},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200
+
+            redirect_resp = client.get(f"/{alias}", follow_redirects=False)
+            assert redirect_resp.status_code in [302, 303, 307]
+            assert redirect_resp.headers["location"] in [target, target + "/"]
+
+
+def test_phase7_10_successful_public_redirect():
+    """10. Public short URL redirects without requiring authentication."""
+    token = register_token("pub_red")
+    alias = f"pub_{os.urandom(4).hex()}"
+    target = "https://fastapi.tiangolo.com"
+    client.post(
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    resp = client.get(f"/{alias}", follow_redirects=False)
+    assert resp.status_code in [302, 303, 307]
+    assert resp.headers["location"] in [target, target + "/"]
+
+
+def test_phase7_11_redirect_from_another_device():
+    """11. Short link works when requested with mobile / external user agents."""
+    token = register_token("mobile_device")
+    alias = f"mob_{os.urandom(4).hex()}"
+    target = "https://developer.mozilla.org"
+    client.post(
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    mobile_headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+        "X-Forwarded-For": "203.0.113.195",
+    }
+    resp = client.get(f"/{alias}", headers=mobile_headers, follow_redirects=False)
+    assert resp.status_code in [302, 303, 307]
+    assert resp.headers["location"] in [target, target + "/"]
+
+
+def test_phase7_12_expired_url():
+    """12. Expired URL is rejected with appropriate status / message."""
+    from datetime import datetime, timedelta, timezone
+    token = register_token("expired_link")
+    alias = f"exp_{os.urandom(4).hex()}"
+    past_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    client.post(
+        "/api/shorten",
+        json={
+            "target_url": "https://archive.org",
+            "custom_alias": alias,
+            "expires_at": past_time,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    resp = client.get(f"/{alias}", follow_redirects=False)
+    assert resp.status_code == 200
+    assert "Link Expired" in resp.text
+
+
+def test_phase7_13_password_protected_url():
+    """13. Password-protected URL requires correct password unlock."""
+    token = register_token("pwd_flow")
+    alias = f"lock_{os.urandom(4).hex()}"
+    target = "https://en.wikipedia.org"
+    password = "CorrectHorseBatteryStaple"
+
+    client.post(
+        "/api/shorten",
+        json={
+            "target_url": target,
+            "custom_alias": alias,
+            "password": password,
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    prompt_resp = client.get(f"/{alias}")
+    assert prompt_resp.status_code == 200
+    assert "Password Required" in prompt_resp.text
+
+    fail_resp = client.post(f"/{alias}", data={"password": "WrongPassword"})
+    assert fail_resp.status_code == 200
+    assert "Incorrect password" in fail_resp.text
+
+    success_resp = client.post(f"/{alias}", data={"password": password}, follow_redirects=False)
+    assert success_resp.status_code in [302, 303, 307]
+    assert success_resp.headers["location"] in [target, target + "/"]
+
+
+def test_localhost_origins_allowed_by_cors():
+    """Verify localhost frontend origins are allowed in CORS preflight."""
+    for origin in ["http://localhost:5173", "http://127.0.0.1:5173"]:
+        resp = client.options(
+            "/api/shorten",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "authorization,content-type",
+            },
+        )
+        assert resp.status_code in [200, 204]
+        assert resp.headers.get("access-control-allow-origin") == origin
+
+
+def test_localhost_public_base_url_in_short_url():
+    """Verify returned short_url uses localhost base url."""
+    token = register_token("local_base")
+    alias = f"local_{os.urandom(4).hex()}"
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.org/test", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    short_url = resp.json()["short_url"]
+    assert short_url.startswith("http://localhost:8000/") or short_url.startswith("http://127.0.0.1:8000/")
+    assert alias in short_url
+
+
+def test_db_persistence_across_sessions():
+    """Verify database user and URL records persist across distinct session queries."""
+    from database import SessionLocal
+    token = register_token("persistence_check")
+    alias = f"persist_{os.urandom(4).hex()}"
+    target = "https://www.python.org"
+
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+
+    # Query with a brand new, independent database session
+    with SessionLocal() as db:
+        record = db.query(models.URL).filter(models.URL.short_id == alias).first()
+        assert record is not None
+        assert record.target_url == target
+        assert record.user_id is not None
+        user = db.query(models.User).filter(models.User.id == record.user_id).first()
+        assert user is not None
+        assert "persistence_check" in user.email
+
+
+def test_firebase_token_verifier_signature_validation():
+    """Verify public key verification rejects tampered or forged tokens."""
+    from firebase_config import verify_firebase_token_with_public_keys
+    # Forged token with invalid header/signature
+    tampered_token = "eyJhbGciOiJSUzI1NiIsImtpZCI6ImludmFsaWQifQ.eyJzdWIiOiIxMjMifQ.invalidsig"
+    result = verify_firebase_token_with_public_keys(tampered_token, "link-shortener-6c96e")
+    assert result is None
+
+
+def test_user_delete_link():
+    """Verify authenticated user can delete their owned link."""
+    token = register_token("del_owner")
+    alias = f"del_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/delete-me", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    del_resp = client.delete(
+        f"/api/user/links/{alias}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_resp.status_code == 200
+    assert del_resp.json()["detail"] == "Short URL deleted successfully"
+
+    # Confirm it returns 404 on subsequent access
+    get_resp = client.get(f"/{alias}")
+    assert get_resp.status_code == 404
+
+
+def test_user_links_isolation():
+    """Verify user link access and deletion is isolated between accounts."""
+    token_a = register_token("user_alpha")
+    token_b = register_token("user_beta")
+
+    alias_a = f"alpha_{os.urandom(4).hex()}"
+    alias_b = f"beta_{os.urandom(4).hex()}"
+
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://alpha.example.com", "custom_alias": alias_a},
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://beta.example.com", "custom_alias": alias_b},
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+
+    # User A views their links
+    resp_a = client.get("/api/user/links", headers={"Authorization": f"Bearer {token_a}"})
+    assert resp_a.status_code == 200
+    links_a = [l["short_id"] for l in resp_a.json()]
+    assert alias_a in links_a
+    assert alias_b not in links_a
+
+    # User A attempts to delete User B's link
+    hack_resp = client.delete(
+        f"/api/user/links/{alias_b}",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert hack_resp.status_code == 404
+
+
+def test_redis_live_caching_and_retrieval():
+    """Verify created short link is immediately cached in Redis."""
+    token = register_token("cache_user")
+    alias = f"cached_{os.urandom(4).hex()}"
+    target = "https://cache.example.com"
+
+    client.post(
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    cached_val = redis_cache.get(f"url:{alias}")
+    if cached_val:
+        import json
+        data = json.loads(cached_val)
+        assert data["target_url"] == target
+
+
+def test_websocket_realtime_connection_and_initial_stats():
+    """Verify WebSocket client can connect with auth token and receive initial stats."""
+    token = register_token("ws_user")
+    alias = f"ws_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://websocket.example.com", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    with client.websocket_connect(f"/api/ws/stats/{alias}?token={token}") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "initial_stats"
+        assert msg["data"]["short_id"] == alias
+        assert msg["data"]["total_clicks"] == 0

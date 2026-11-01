@@ -35,6 +35,8 @@ services:
       dockerfile: Dockerfile
     container_name: bytelink-backend
     restart: always
+    profiles:
+      - full
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,6 +49,8 @@ services:
     environment:
       DATABASE_URL: postgresql://bytelink:bytelink@postgres:5432/bytelink
       REDIS_URL: redis://redis:6379/0
+      PUBLIC_BASE_URL: http://localhost:8000
+      ENV: development
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")'"]
       interval: 10s

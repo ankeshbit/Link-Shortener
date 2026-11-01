@@ -12,9 +12,11 @@ from firebase_config import verify_firebase_id_token
 from jose import JWTError, jwt
 from loguru import logger
 import models
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 # Legacy JWT configuration (optional during migration / fallback)
 JWT_SECRET = os.getenv("JWT_SECRET", "bytelink-legacy-secret-key-fallback")
@@ -80,7 +82,10 @@ def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> 
 def decode_access_token(token: str) -> dict | None:
     """Decodes a legacy JWT access token if applicable."""
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        clean_token = token.strip()
+        if clean_token.lower().startswith("bearer "):
+            clean_token = clean_token[7:].strip()
+        payload = jwt.decode(clean_token, JWT_SECRET, algorithms=[ALGORITHM])
         if payload.get("type") != "access":
             return None
         return payload
@@ -91,7 +96,10 @@ def decode_access_token(token: str) -> dict | None:
 def decode_refresh_token(token: str) -> dict | None:
     """Decodes a legacy JWT refresh token if applicable."""
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        clean_token = token.strip()
+        if clean_token.lower().startswith("bearer "):
+            clean_token = clean_token[7:].strip()
+        payload = jwt.decode(clean_token, JWT_SECRET, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
             return None
         return payload
@@ -109,6 +117,7 @@ def get_or_create_user_from_firebase(db: Session, firebase_info: dict) -> models
     - If user exists by firebase_uid -> returns user.
     - If user exists by verified email without firebase_uid -> links firebase_uid and returns user.
     - Otherwise -> creates a new user record in Neon and returns it.
+    Safely rolls back aborted transactions on race conditions / conflicts.
     """
     uid = firebase_info.get("uid")
     if not uid:
@@ -140,20 +149,34 @@ def get_or_create_user_from_firebase(db: Session, firebase_info: dict) -> models
                 f"Linking existing user account ID {user.id} ({email}) with firebase_uid: {uid}"
             )
             user.firebase_uid = uid
-            db.commit()
-            db.refresh(user)
-            return user
+            try:
+                db.commit()
+                db.refresh(user)
+                return user
+            except Exception:
+                db.rollback()
 
-    # 3. Create new user in Neon
-    logger.info(f"Creating new Neon user for firebase_uid: {uid} ({email})")
+    # 3. Create new user in PostgreSQL
+    logger.info(f"Creating new user for firebase_uid: {uid} ({email})")
     user = models.User(
         email=email or f"{uid}@firebase.user",
         firebase_uid=uid,
     )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
+    try:
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+    except Exception:
+        db.rollback()
+        # Query again in case user was created concurrently
+        user = db.query(models.User).filter(
+            (models.User.firebase_uid == uid)
+            | (models.User.email == (email or f"{uid}@firebase.user"))
+        ).first()
+        if user:
+            return user
+        raise
 
 
 def get_current_user(
@@ -165,21 +188,32 @@ def get_current_user(
     Verifies Firebase ID token, resolves the user in Neon DB, and returns the User model instance.
     """
     if not token:
+        logger.debug("Authentication check: No Authorization token provided in request.")
         return None
 
-    firebase_info = verify_firebase_id_token(token)
+    clean_token = token.strip()
+    if clean_token.lower().startswith("bearer "):
+        clean_token = clean_token[7:].strip()
+
+    logger.debug(f"Processing Authorization token (length: {len(clean_token)} chars).")
+    firebase_info = verify_firebase_id_token(clean_token)
     if firebase_info:
+        logger.debug(f"Firebase token verified. Resolving user in database for UID prefix: {firebase_info.get('uid', '')[:8]}...")
         return get_or_create_user_from_firebase(db, firebase_info)
 
     # Legacy token fallback (e.g. for existing automated test suite compatibility)
-    payload = decode_access_token(token)
+    payload = decode_access_token(clean_token)
     if payload and payload.get("sub"):
         try:
             user_id = int(payload["sub"])
-            return db.query(models.User).filter(models.User.id == user_id).first()
+            user = db.query(models.User).filter(models.User.id == user_id).first()
+            if user:
+                logger.debug(f"Legacy JWT successfully verified for user ID: {user.id}")
+                return user
         except (ValueError, TypeError):
             pass
 
+    logger.warning("Authentication failed: Supplied token is neither a valid Firebase ID token nor an internal JWT.")
     return None
 
 
@@ -195,6 +229,7 @@ def require_current_user(
 ) -> models.User:
     """Requires an authenticated user or raises HTTP 401."""
     if user is None:
+        logger.warning("Access denied: require_current_user found no authenticated user (raising HTTP 401).")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
@@ -217,12 +252,16 @@ def get_current_user_from_token(
     if not token:
         return None
 
-    firebase_info = verify_firebase_id_token(token)
+    clean_token = token.strip()
+    if clean_token.lower().startswith("bearer "):
+        clean_token = clean_token[7:].strip()
+
+    firebase_info = verify_firebase_id_token(clean_token)
     if firebase_info:
         return get_or_create_user_from_firebase(db, firebase_info)
 
     # Legacy token fallback
-    payload = decode_access_token(token)
+    payload = decode_access_token(clean_token)
     if payload and payload.get("sub"):
         try:
             user_id = int(payload["sub"])

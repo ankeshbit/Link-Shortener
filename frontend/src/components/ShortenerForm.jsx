@@ -57,19 +57,71 @@ const ShortenerForm = () => {
       setPassword('');
       setShowAdvanced(false);
     } catch (err) {
-      if (err.response?.status === 429) {
-        setError("Too many requests! Rate limit exceeded.");
-      } else if (err.response?.data?.detail) {
-        const detail = err.response.data.detail;
-        if (typeof detail === 'string') {
-          setError(detail);
-        } else if (Array.isArray(detail)) {
-          setError(detail.map(d => d.msg || d).join(', '));
+      console.error('URL shortening error:', err);
+
+      if (!err.response) {
+        if (err.code === 'ERR_NETWORK' || err.message?.includes('Network Error')) {
+          setError('Network error: Unable to connect to the backend server. Please verify your connection or CORS configuration.');
         } else {
-          setError(JSON.stringify(detail));
+          setError(err.message || 'Unable to connect to the server. Please check your network connection.');
         }
-      } else {
-        setError("Failed to shorten URL. Make sure it's valid.");
+        return;
+      }
+
+      const status = err.response.status;
+      const data = err.response.data;
+
+      let serverMessage = '';
+      if (data) {
+        if (typeof data.message === 'string' && data.message.trim()) {
+          serverMessage = data.message.trim();
+        } else if (typeof data.detail === 'string' && data.detail.trim()) {
+          serverMessage = data.detail.trim();
+        } else if (Array.isArray(data.detail)) {
+          serverMessage = data.detail
+            .map((d) => d.msg || (typeof d === 'string' ? d : JSON.stringify(d)))
+            .join(', ');
+        } else if (Array.isArray(data.errors)) {
+          serverMessage = data.errors
+            .map((d) => d.msg || (typeof d === 'string' ? d : JSON.stringify(d)))
+            .join(', ');
+        }
+      }
+
+      switch (status) {
+        case 400:
+          setError(serverMessage || 'Bad request. Please verify the URL and input parameters.');
+          break;
+        case 401:
+          setError(serverMessage || 'Authentication required or your session has expired. Please sign in again.');
+          setShowAuthPrompt(true);
+          break;
+        case 403:
+          setError(serverMessage || 'Permission denied. You do not have access to create this link.');
+          break;
+        case 404:
+          setError(serverMessage || 'Shortening service endpoint not found (404). Please verify backend deployment.');
+          break;
+        case 409:
+          setError(serverMessage || 'This custom alias is already in use. Please choose another alias.');
+          break;
+        case 422:
+          setError(serverMessage || 'Invalid URL format. Please enter a valid URL including http:// or https://.');
+          break;
+        case 429:
+          setError(serverMessage || 'Rate limit exceeded: Too many requests. Please slow down and try again shortly.');
+          break;
+        case 500:
+          setError('An internal server error occurred. Please try again in a few moments.');
+          break;
+        case 502:
+        case 503:
+        case 504:
+          setError('The backend server is temporarily unavailable or starting up. Please wait a few seconds and try again.');
+          break;
+        default:
+          setError(serverMessage || `Failed to shorten URL (Error ${status}). Please verify the URL.`);
+          break;
       }
     } finally {
       setLoading(false);

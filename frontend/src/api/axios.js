@@ -2,26 +2,27 @@ import axios from 'axios';
 import { auth } from '../auth/firebase';
 
 const configuredApiURL = import.meta.env.VITE_API_URL?.trim();
-const defaultApiURL = import.meta.env.DEV
-  ? `http://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:8000`
-  : '';
-const localApiURL = configuredApiURL || defaultApiURL;
-const apiURL = new URL(localApiURL || 'http://localhost:8000');
+const defaultApiURL = `http://${typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost'}:8000`;
+const rawApiURL = configuredApiURL || defaultApiURL;
+
+let resolvedURL;
+try {
+  resolvedURL = new URL(rawApiURL);
+} catch {
+  resolvedURL = new URL('http://localhost:8000');
+}
+
+// In local browser development, keep the port while mirroring window hostname if on localhost
 if (
   import.meta.env.DEV &&
-  (apiURL.hostname === 'localhost' || apiURL.hostname === '127.0.0.1') &&
-  typeof window !== 'undefined'
+  (resolvedURL.hostname === 'localhost' || resolvedURL.hostname === '127.0.0.1') &&
+  typeof window !== 'undefined' &&
+  window.location.hostname
 ) {
-  apiURL.hostname = window.location.hostname;
+  resolvedURL.hostname = window.location.hostname;
 }
 
-export const API_BASE_URL = (configuredApiURL || defaultApiURL)
-  ? apiURL.origin.replace(/\/$/, '')
-  : '';
-
-if (!API_BASE_URL) {
-  throw new Error('VITE_API_URL must be configured for production builds.');
-}
+export const API_BASE_URL = resolvedURL.origin.replace(/\/$/, '');
 
 const api = axios.create({
   baseURL: API_BASE_URL,

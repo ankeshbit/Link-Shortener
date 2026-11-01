@@ -5,6 +5,10 @@
 .env.development
 .env.local
 *.local
+*service-account*.json
+*firebase*.json
+*.pem
+*.key
 
 # Virtual environments
 venv/
