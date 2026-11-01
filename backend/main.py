@@ -466,7 +466,7 @@ def compile_stats(url: models.URL, db: Session) -> dict:
             "os": c.os,
             "device": c.device,
         }
-        for c in reversed(recent_events)
+        for c in recent_events
     ]
 
     return {

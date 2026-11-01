@@ -308,7 +308,7 @@ const AnalyticsDashboard = () => {
           </p>
         ) : (
           <ul className="stats-log-list">
-            {stats.recent_clicks.slice().reverse().map((click, i) => (
+            {stats.recent_clicks.map((click, i) => (
               <li key={i} className="stats-log-item">
                 <div className="log-item-details">
                   <span className="log-item-ip">{click.ip || 'Hidden IP'}</span>
