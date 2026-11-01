@@ -28,18 +28,42 @@ const ShortenerForm = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!url) return;
+    const raw = url.trim();
+    if (!raw) {
+      setError('Please enter a URL to shorten.');
+      return;
+    }
     if (!isAuthenticated) {
       setShowAuthPrompt(true);
       return;
     }
-    setLoading(true);
     setError('');
-    
-    let formattedUrl = url.trim();
-    if (!/^https?:\/\//i.test(formattedUrl)) {
+
+    let formattedUrl = raw;
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(formattedUrl)) {
       formattedUrl = `https://${formattedUrl}`;
     }
+
+    let parsed;
+    try {
+      parsed = new URL(formattedUrl);
+    } catch {
+      setError('Invalid URL format. Please enter a valid web address (e.g. example.com).');
+      return;
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      setError('Only HTTP and HTTPS URLs are supported.');
+      return;
+    }
+
+    const host = parsed.hostname;
+    if (!host || (host !== 'localhost' && !host.includes('.'))) {
+      setError('Invalid domain. Please enter a valid domain name (e.g. example.com or localhost).');
+      return;
+    }
+
+    setLoading(true);
     
     try {
       const payload = { target_url: formattedUrl };
@@ -188,8 +212,11 @@ const ShortenerForm = () => {
             <div className="input-container-outer">
               <input 
                 id="hero-input"
-                type="url" 
+                type="text" 
                 inputMode="url"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
                 className="url-input-new" 
                 placeholder="https://your-long-url.com/very/long/path" 
                 value={url}
