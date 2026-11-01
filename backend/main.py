@@ -28,10 +28,10 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from loguru import logger
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -42,6 +42,11 @@ import security
 from database import SessionLocal, engine, get_db
 from firebase_config import initialize_firebase
 from redis_client import redis_cache
+
+try:
+    from user_agents import parse as parse_user_agent
+except ImportError:
+    parse_user_agent = None
 
 # Load environment variables
 load_dotenv()
@@ -181,7 +186,7 @@ async def integrity_exception_handler(request: Request, exc: IntegrityError):
     )
     msg = (
         "Alias already in use. Please select another alias."
-        if "urls_short_id" in str(exc).lower()
+        if "short_id" in str(exc).lower()
         else "Database conflict: Integrity constraint violated."
     )
     return JSONResponse(
@@ -381,6 +386,21 @@ def get_client_ip(request: Request) -> str:
         return "127.0.0.1"
 
 
+def is_public_ip(ip_str: str) -> bool:
+    """Return True if IP address is a valid public, routable IP address."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return not (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_link_local
+        )
+    except ValueError:
+        return False
+
+
 def check_rate_limit(key: str, limit: int = 20, window: int = 60):
     """
     Atomic rate limiting with Redis Lua script.
@@ -415,26 +435,40 @@ def generate_short_id(length: int = 7) -> str:
 
 
 def compile_stats(url: models.URL, db: Session) -> dict:
-    clicks = (
-        db.query(models.ClickEvent).filter(models.ClickEvent.url_id == url.id).all()
-    )
-    countries = {}
-    last_clicks = []
-
-    for c in clicks:
-        if c.country:
-            countries[c.country] = countries.get(c.country, 0) + 1
-
-    for c in clicks[-20:]:
-        last_clicks.append(
-            {
-                "time": c.clicked_at.isoformat() if c.clicked_at else None,
-                "country": c.country,
-                "city": c.city,
-                "ip": c.ip_address,
-                "user_agent": c.user_agent,
-            }
+    """Compile click statistics using SQL GROUP BY aggregation and limited recent history."""
+    # 1. SQL GROUP BY for countries aggregation
+    country_counts = (
+        db.query(models.ClickEvent.country, func.count(models.ClickEvent.id))
+        .filter(
+            models.ClickEvent.url_id == url.id,
+            models.ClickEvent.country.isnot(None),
         )
+        .group_by(models.ClickEvent.country)
+        .all()
+    )
+    countries = {c: count for c, count in country_counts if c}
+
+    # 2. Last 20 clicks ordered by clicked_at DESC, id DESC
+    recent_events = (
+        db.query(models.ClickEvent)
+        .filter(models.ClickEvent.url_id == url.id)
+        .order_by(models.ClickEvent.clicked_at.desc(), models.ClickEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    last_clicks = [
+        {
+            "time": c.clicked_at.isoformat() if c.clicked_at else None,
+            "country": c.country,
+            "city": c.city,
+            "ip": c.ip_address,
+            "user_agent": c.user_agent,
+            "browser": c.browser,
+            "os": c.os,
+            "device": c.device,
+        }
+        for c in reversed(recent_events)
+    ]
 
     return {
         "short_id": url.short_id,
@@ -446,27 +480,51 @@ def compile_stats(url: models.URL, db: Session) -> dict:
 
 
 def track_click(short_id: str, user_agent: str, ip: str):
-    # Background tasks run after the request dependency may have been closed.
+    """Background task to record click event and broadcast live updates."""
     with SessionLocal() as db:
         url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
         if not url:
             logger.warning(f"Could not log click for missing short_id: {short_id}")
             return
 
-        url.clicks_count += 1
+        # Atomically increment clicks_count in the database
+        db.query(models.URL).filter(models.URL.id == url.id).update(
+            {models.URL.clicks_count: models.URL.clicks_count + 1},
+            synchronize_session="fetch",
+        )
 
         country, city, lat, lon = None, None, None, None
-        if ip and ip != "127.0.0.1" and ip != "localhost":
+        if ip and is_public_ip(ip):
             try:
+                # Use HTTPS for GeoIP lookups, and only query for public addresses
                 with httpx.Client(timeout=2.0) as client:
-                    res = client.get(f"http://ip-api.com/json/{ip}").json()
-                if res.get("status") == "success":
-                    country = res.get("country")
-                    city = res.get("city")
-                    lat = res.get("lat")
-                    lon = res.get("lon")
+                    res = client.get(f"https://ipapi.co/{ip}/json/").json()
+                    if res.get("country_name"):
+                        country = res.get("country_name")
+                        city = res.get("city")
+                        lat = res.get("latitude")
+                        lon = res.get("longitude")
             except Exception as e:
-                logger.error(f"IP lookup failed for {ip}: {e}")
+                logger.debug(f"GeoIP lookup failed for {ip}: {e}")
+
+        browser, os_name, device = None, None, None
+        if user_agent and user_agent != "Unknown" and parse_user_agent:
+            try:
+                ua = parse_user_agent(user_agent)
+                browser = ua.browser.family or None
+                os_name = ua.os.family or None
+                if ua.is_mobile:
+                    device = "Mobile"
+                elif ua.is_tablet:
+                    device = "Tablet"
+                elif ua.is_pc:
+                    device = "Desktop"
+                elif ua.is_bot:
+                    device = "Bot"
+                else:
+                    device = "Other"
+            except Exception as e:
+                logger.debug(f"User agent parsing failed: {e}")
 
         click = models.ClickEvent(
             url_id=url.id,
@@ -476,10 +534,14 @@ def track_click(short_id: str, user_agent: str, ip: str):
             lat=lat,
             lon=lon,
             user_agent=user_agent,
+            browser=browser,
+            os=os_name,
+            device=device,
         )
         try:
             db.add(click)
             db.commit()
+            db.refresh(url)
             logger.info(
                 f"Click logged for short_id: {short_id}. Total clicks: {url.clicks_count}"
             )
@@ -553,6 +615,21 @@ class URLCreate(BaseModel):
                 f"'{trimmed}' is a reserved route name and cannot be used as a custom alias."
             )
         return trimmed
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_expires_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        # Normalize to UTC
+        if value.tzinfo is None:
+            utc_val = value.replace(tzinfo=timezone.utc)
+        else:
+            utc_val = value.astimezone(timezone.utc)
+
+        if utc_val <= datetime.now(timezone.utc):
+            raise ValueError("expires_at must be in the future.")
+        return utc_val
 
 
 class UserRegister(BaseModel):
@@ -699,8 +776,17 @@ def sync_user(
 def get_user_links(
     current_user_id: int = Depends(security.require_current_user_id),
     db: Session = Depends(get_db),
+    limit: int = 50,
+    offset: int = 0,
 ):
-    urls = db.query(models.URL).filter(models.URL.user_id == current_user_id).all()
+    urls = (
+        db.query(models.URL)
+        .filter(models.URL.user_id == current_user_id)
+        .order_by(models.URL.created_at.desc(), models.URL.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return [
         {
             "id": url.id,
@@ -804,13 +890,21 @@ def create_short_url(
         f"Short link created: {short_id} -> {target_url_str} (User: {current_user_id})"
     )
 
+    ttl_seconds = 86400  # Default 24 hours
+    if item.expires_at:
+        seconds_left = int(
+            (item.expires_at - datetime.now(timezone.utc)).total_seconds()
+        )
+        if 0 < seconds_left < ttl_seconds:
+            ttl_seconds = seconds_left
+
     cache_data = {
         "target_url": target_url_str,
         "password": bool(hashed_pwd),
         "expires_at": item.expires_at.isoformat() if item.expires_at else None,
     }
     try:
-        redis_cache.set(f"url:{short_id}", json.dumps(cache_data))
+        redis_cache.set(f"url:{short_id}", json.dumps(cache_data), ex=ttl_seconds)
     except Exception as e:
         logger.warning(f"Could not write cache entry for {short_id}: {e}")
 
@@ -887,14 +981,25 @@ def redirect_url(
         password = bool(url.password)
         expires_at = url.expires_at
 
-        # Write to Cache for next requests
+        # Write to Cache with appropriate TTL
+        ttl_seconds = 86400
+        if expires_at:
+            exp_utc = (
+                expires_at
+                if expires_at.tzinfo
+                else expires_at.replace(tzinfo=timezone.utc)
+            )
+            seconds_left = int((exp_utc - datetime.now(timezone.utc)).total_seconds())
+            if 0 < seconds_left < ttl_seconds:
+                ttl_seconds = seconds_left
+
         cache_data = {
             "target_url": target_url,
             "password": password,
             "expires_at": expires_at.isoformat() if expires_at else None,
         }
         try:
-            redis_cache.set(f"url:{short_id}", json.dumps(cache_data))
+            redis_cache.set(f"url:{short_id}", json.dumps(cache_data), ex=ttl_seconds)
         except Exception as e:
             logger.warning(f"Could not update cache: {e}")
 
@@ -905,12 +1010,23 @@ def redirect_url(
         )
         if datetime.now(timezone.utc) > exp_utc:
             logger.info(f"Access attempt to expired link: {short_id}")
+            if request.method == "HEAD":
+                return Response(status_code=200)
             return HTMLResponse(
                 get_html_template(
                     "Link Expired",
                     "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
                 )
             )
+
+    # HEAD request handling: return redirect headers without click tracking or body
+    if request.method == "HEAD":
+        if password:
+            return Response(
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+            )
+        return Response(status_code=307, headers={"Location": target_url})
 
     # Render unlock page if password is set
     if password:

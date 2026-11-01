@@ -1,4 +1,12 @@
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -33,19 +41,23 @@ class URL(Base):
     password = Column(String, nullable=True)
 
     # Optional association with User (guest shorteners will have user_id=None)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
 
     user = relationship("User", back_populates="urls")
     clicks = relationship(
         "ClickEvent", back_populates="url", cascade="all, delete-orphan"
     )
 
+    __table_args__ = (Index("ix_urls_user_id_created_at", "user_id", "created_at"),)
+
 
 class ClickEvent(Base):
     __tablename__ = "click_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"))
+    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"), index=True)
     ip_address = Column(String(50))
     country = Column(String(50))
     city = Column(String(50))

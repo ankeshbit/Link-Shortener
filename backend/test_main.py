@@ -633,18 +633,19 @@ def test_phase7_12_expired_url():
     """12. Expired URL is rejected with appropriate status / message."""
     from datetime import datetime, timedelta, timezone
 
-    token = register_token("expired_link")
+    import models
+    from database import SessionLocal
+
     alias = f"exp_{os.urandom(4).hex()}"
-    past_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    client.post(
-        "/api/shorten",
-        json={
-            "target_url": "https://archive.org",
-            "custom_alias": alias,
-            "expires_at": past_time,
-        },
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    past_time = datetime.now(timezone.utc) - timedelta(hours=1)
+    with SessionLocal() as db:
+        url = models.URL(
+            short_id=alias,
+            target_url="https://archive.org",
+            expires_at=past_time,
+        )
+        db.add(url)
+        db.commit()
 
     resp = client.get(f"/{alias}", follow_redirects=False)
     assert resp.status_code == 200
@@ -1120,3 +1121,215 @@ def test_phase1_websocket_auth_first_frame():
         msg = ws.receive_json()
         assert msg["type"] == "initial_stats"
         assert msg["data"]["short_id"] == alias
+
+
+# ==============================================================================
+# PHASE 2: CORRECTNESS & DATA INTEGRITY REGRESSION TESTS
+# ==============================================================================
+
+
+def test_phase2_pydantic_validation_error_json_serializable():
+    """1. Validation errors return JSON serializable structure with status=error."""
+    token = register_token("pyd_user")
+    resp = client.post(
+        "/api/shorten",
+        json={"target_url": "ftp://bad-scheme.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 422
+    data = resp.json()
+    assert data["status"] == "error"
+    assert (
+        "target_url" in data["message"].lower() or "absolute" in data["message"].lower()
+    )
+    assert isinstance(data["detail"], list)
+
+
+def test_phase2_starlette_http_exception_and_head_route():
+    """2. Starlette HTTPException returns consistent error shape, and HEAD requests succeed."""
+    # Unknown route returns JSON with status=error
+    resp404 = client.get("/api/completely-nonexistent-route-xyz")
+    assert resp404.status_code == 404
+    data404 = resp404.json()
+    assert data404["status"] == "error"
+
+    # HEAD request on redirect URL
+    token = register_token("head_user")
+    alias = f"head_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://python.org", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    head_resp = client.head(f"/{alias}", follow_redirects=False)
+    assert head_resp.status_code in [302, 303, 307]
+    assert head_resp.headers["location"] == "https://python.org"
+    assert len(head_resp.content) == 0
+
+
+def test_phase2_atomic_clicks_count_increment():
+    """3. Clicks count increments atomically and reflects correctly in stats."""
+    import models
+    from database import SessionLocal
+    from main import track_click
+
+    token = register_token("atomic_click")
+    alias = f"atom_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/atomic", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # Trigger clicks
+    track_click(alias, "Mozilla/5.0", "127.0.0.1")
+    track_click(alias, "Mozilla/5.0", "127.0.0.1")
+
+    with SessionLocal() as db:
+        url = db.query(models.URL).filter(models.URL.short_id == alias).first()
+        assert url.clicks_count >= 2
+
+
+def test_phase2_utc_normalization_and_past_expiry_rejected():
+    """4. Rejects past expires_at with 422 and normalizes future times to UTC."""
+    from datetime import datetime, timedelta, timezone
+
+    token = register_token("expiry_val")
+    past_iso = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+
+    # Past expiry must be rejected with 422
+    past_resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com", "expires_at": past_iso},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert past_resp.status_code == 422
+    assert "future" in past_resp.text.lower()
+
+    # Future expiry accepted and normalized
+    future_iso = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    future_resp = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com", "expires_at": future_iso},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert future_resp.status_code == 200
+
+
+def test_phase2_sql_groupby_compile_stats():
+    """5. compile_stats performs SQL GROUP BY and limits recent clicks to 20."""
+    import models
+    from database import SessionLocal
+    from main import compile_stats
+
+    alias = f"stats_{os.urandom(4).hex()}"
+    with SessionLocal() as db:
+        url = models.URL(
+            short_id=alias,
+            target_url="https://example.com/stats",
+            clicks_count=25,
+        )
+        db.add(url)
+        db.commit()
+        db.refresh(url)
+
+        # Insert 25 clicks across 2 countries
+        for i in range(25):
+            c_name = "United States" if i % 2 == 0 else "Germany"
+            event = models.ClickEvent(
+                url_id=url.id,
+                country=c_name,
+                ip_address="127.0.0.1",
+                user_agent="TestAgent",
+            )
+            db.add(event)
+        db.commit()
+
+        stats = compile_stats(url, db)
+        assert stats["countries"]["United States"] == 13
+        assert stats["countries"]["Germany"] == 12
+        assert len(stats["recent_clicks"]) == 20
+
+
+def test_phase2_redis_cache_ttl_and_delete():
+    """6. Redis cache uses TTL and DELETE purges cached keys."""
+    token = register_token("cache_ttl_user")
+    alias = f"ttl_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://cached-example.com", "custom_alias": alias},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    if redis_cache.client:
+        ttl = redis_cache.client.ttl(f"url:{alias}")
+        assert ttl > 0
+
+    # Delete link
+    del_resp = client.delete(
+        f"/api/user/links/{alias}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_resp.status_code == 200
+
+    if redis_cache.client:
+        assert redis_cache.get(f"url:{alias}") is None
+
+
+def test_phase2_user_links_pagination_and_sorting():
+    """8. GET /api/user/links supports limit, offset, and orders by created_at DESC."""
+    token = register_token("pagination_user")
+    aliases = []
+    for i in range(3):
+        a = f"page_{i}_{os.urandom(3).hex()}"
+        aliases.append(a)
+        client.post(
+            "/api/shorten",
+            json={"target_url": f"https://example.com/{i}", "custom_alias": a},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    # Request limit 2
+    resp = client.get(
+        "/api/user/links?limit=2&offset=0",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 2
+    # Most recent should be first
+    assert items[0]["short_id"] == aliases[2]
+    assert items[1]["short_id"] == aliases[1]
+
+
+def test_phase2_user_agent_device_detection():
+    """11. user_agents correctly parses browser, os, and device categories."""
+    import models
+    from database import SessionLocal
+    from main import track_click
+
+    alias = f"ua_{os.urandom(4).hex()}"
+    with SessionLocal() as db:
+        url = models.URL(short_id=alias, target_url="https://example.com")
+        db.add(url)
+        db.commit()
+
+    # Mobile Safari
+    mobile_ua = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"
+    )
+    track_click(alias, mobile_ua, "127.0.0.1")
+
+    with SessionLocal() as db:
+        url = db.query(models.URL).filter(models.URL.short_id == alias).first()
+        last_event = (
+            db.query(models.ClickEvent)
+            .filter(models.ClickEvent.url_id == url.id)
+            .order_by(models.ClickEvent.id.desc())
+            .first()
+        )
+        assert last_event.device == "Mobile"
+        assert "Safari" in (last_event.browser or "")
+        assert "iOS" in (last_event.os or "")
