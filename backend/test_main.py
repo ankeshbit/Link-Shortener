@@ -1257,3 +1257,98 @@ def test_short_code_collision_retry_exhausted():
         assert res.status_code == 500
         msg = res.json().get("message", res.json().get("detail", ""))
         assert "Could not generate unique short URL" in msg
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_api_key_lifecycle_and_authentication():
+    """Verifies API key creation, hashed persistence, listing, authentication (Bearer & X-API-Key), and revocation."""
+    import hashlib
+
+    # 1. Register user and get JWT token
+    token = register_token("api_key_user")
+    jwt_headers = {"Authorization": f"Bearer {token}"}
+
+    # 2. Create API key
+    create_res = client.post(
+        "/api/user/api-keys",
+        json={"name": "Production Deploy Key"},
+        headers=jwt_headers,
+    )
+    assert create_res.status_code == 201
+    key_data = create_res.json()
+    assert "api_key" in key_data
+    raw_key = key_data["api_key"]
+    key_id = key_data["id"]
+    assert raw_key.startswith("bl_live_")
+    assert key_data["name"] == "Production Deploy Key"
+
+    # 3. Verify only SHA-256 hash is persisted in DB, never plaintext
+    from database import SessionLocal
+
+    with SessionLocal() as db:
+        db_key = db.query(models.APIKey).filter(models.APIKey.id == key_id).first()
+        assert db_key is not None
+        assert db_key.key_hash == hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+        assert db_key.key_hash != raw_key
+
+    # 4. List keys: plaintext and hash are omitted
+    list_res = client.get("/api/user/api-keys", headers=jwt_headers)
+    assert list_res.status_code == 200
+    user_keys = list_res.json()
+    assert len(user_keys) >= 1
+    target_item = next(k for k in user_keys if k["id"] == key_id)
+    assert "api_key" not in target_item
+    assert "key_hash" not in target_item
+    assert target_item["is_active"] is True
+    assert target_item["revoked_at"] is None
+
+    # 5. Authenticate POST /api/shorten using Authorization: Bearer <raw_key>
+    bearer_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/via-bearer-api-key"},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert bearer_res.status_code == 200
+    short_id_bearer = bearer_res.json()["short_id"]
+
+    # 6. Authenticate POST /api/shorten using X-API-Key: <raw_key>
+    header_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/via-x-api-key-header"},
+        headers={"X-API-Key": raw_key},
+    )
+    assert header_res.status_code == 200
+    short_id_header = header_res.json()["short_id"]
+
+    # Verify both shortened URLs belong to the authenticated user
+    with SessionLocal() as db:
+        u_bearer = (
+            db.query(models.URL).filter(models.URL.short_id == short_id_bearer).first()
+        )
+        u_header = (
+            db.query(models.URL).filter(models.URL.short_id == short_id_header).first()
+        )
+        assert u_bearer.user_id == db_key.user_id
+        assert u_header.user_id == db_key.user_id
+
+    # 7. Revoke API key
+    revoke_res = client.delete(f"/api/user/api-keys/{key_id}", headers=jwt_headers)
+    assert revoke_res.status_code == 200
+    assert "revoked successfully" in revoke_res.json()["message"]
+
+    # 8. Authenticating with revoked key must fail with 401 Unauthorized
+    revoked_bearer_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/fail-revoked-bearer"},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert revoked_bearer_res.status_code == 401
+
+    revoked_header_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/fail-revoked-header"},
+        headers={"X-API-Key": raw_key},
+    )
+    assert revoked_header_res.status_code == 401

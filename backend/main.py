@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import ipaddress
 import json
 import os
@@ -613,6 +614,10 @@ class TokenRefreshRequest(BaseModel):
     refresh_token: str
 
 
+class APIKeyCreate(BaseModel):
+    name: Optional[str] = Field("Default API Key", max_length=100)
+
+
 @app.post(
     "/api/auth/register",
     status_code=status.HTTP_201_CREATED,
@@ -838,6 +843,87 @@ def delete_user_link(
         logger.warning(f"Could not clear cache for deleted url {short_id}: {e}")
 
     return {"detail": "Short URL deleted successfully"}
+
+
+@app.post("/api/user/api-keys", status_code=status.HTTP_201_CREATED)
+def create_api_key(
+    item: APIKeyCreate,
+    current_user_id: int = Depends(security.require_current_user_id),
+    db: Session = Depends(get_db),
+):
+    raw_key = f"bl_live_{secrets.token_urlsafe(24)}"
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    prefix = raw_key[:12] + "..."
+    key_name = (item.name or "Default API Key").strip()
+
+    new_key = models.APIKey(
+        user_id=current_user_id,
+        key_hash=key_hash,
+        prefix=prefix,
+        name=key_name,
+    )
+    db.add(new_key)
+    db.commit()
+    db.refresh(new_key)
+    logger.info(f"API key created for user {current_user_id}: {prefix}")
+
+    return {
+        "id": new_key.id,
+        "name": new_key.name,
+        "prefix": new_key.prefix,
+        "api_key": raw_key,
+        "created_at": new_key.created_at.isoformat() if new_key.created_at else None,
+    }
+
+
+@app.get("/api/user/api-keys")
+def list_api_keys(
+    current_user_id: int = Depends(security.require_current_user_id),
+    db: Session = Depends(get_db),
+):
+    keys = (
+        db.query(models.APIKey)
+        .filter(models.APIKey.user_id == current_user_id)
+        .order_by(models.APIKey.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": k.id,
+            "name": k.name,
+            "prefix": k.prefix,
+            "created_at": k.created_at.isoformat() if k.created_at else None,
+            "revoked_at": k.revoked_at.isoformat() if k.revoked_at else None,
+            "is_active": k.revoked_at is None,
+        }
+        for k in keys
+    ]
+
+
+@app.delete("/api/user/api-keys/{key_id}")
+def revoke_api_key(
+    key_id: int,
+    current_user_id: int = Depends(security.require_current_user_id),
+    db: Session = Depends(get_db),
+):
+    key = (
+        db.query(models.APIKey)
+        .filter(
+            models.APIKey.id == key_id,
+            models.APIKey.user_id == current_user_id,
+        )
+        .first()
+    )
+    if not key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API key not found",
+        )
+    if key.revoked_at is None:
+        key.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.info(f"API key {key_id} revoked by user {current_user_id}")
+    return {"message": "API key revoked successfully"}
 
 
 # URL Shortening endpoint

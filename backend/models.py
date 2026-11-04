@@ -19,6 +19,9 @@ class User(Base):
 
     # Cascade deletes: If a user account is deleted, remove their links too
     urls = relationship("URL", back_populates="user", cascade="all, delete-orphan")
+    api_keys = relationship(
+        "APIKey", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class URL(Base):
@@ -81,3 +84,19 @@ class LinkReport(Base):
     )
 
     url = relationship("URL", back_populates="reports")
+
+
+class APIKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    key_hash = Column(String(64), unique=True, index=True, nullable=False)
+    prefix = Column(String(16), nullable=False)
+    name = Column(String(100), nullable=False, default="Default API Key")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    user = relationship("User", back_populates="api_keys")

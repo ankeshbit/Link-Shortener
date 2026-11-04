@@ -7,7 +7,7 @@ import bcrypt
 import models
 from database import get_db
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from firebase_config import verify_firebase_id_token
 from jose import JWTError, jwt
@@ -156,22 +156,54 @@ def get_or_create_user_from_firebase(db: Session, firebase_info: dict) -> models
     return user
 
 
+def get_user_from_api_key(api_key: str, db: Session) -> Optional[models.User]:
+    """Resolves an active User instance from an un-revoked API key hash."""
+    if not api_key:
+        return None
+    key_hash = hashlib.sha256(api_key.strip().encode("utf-8")).hexdigest()
+    api_key_record = (
+        db.query(models.APIKey)
+        .filter(
+            models.APIKey.key_hash == key_hash,
+            models.APIKey.revoked_at.is_(None),
+        )
+        .first()
+    )
+    if api_key_record:
+        return api_key_record.user
+    return None
+
+
 def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     db: Session = Depends(get_db),
 ) -> Optional[models.User]:
     """
-    Dependency that extracts and verifies the identity from the Authorization Bearer token.
-    Verifies Firebase ID token, resolves the user in Neon DB, and returns the User model instance.
+    Dependency that extracts and verifies the identity from the Authorization Bearer token,
+    X-API-Key header, or Firebase ID token. Resolves the user in DB and returns the User instance.
     """
+    # 1. Direct API key provided via X-API-Key header
+    if x_api_key:
+        user = get_user_from_api_key(x_api_key, db)
+        if user:
+            return user
+
     if not token:
         return None
 
+    # 2. Check if Authorization Bearer token is an API key
+    if token.startswith("bl_") or len(token) > 20:
+        api_user = get_user_from_api_key(token, db)
+        if api_user:
+            return api_user
+
+    # 3. Firebase ID token check
     firebase_info = verify_firebase_id_token(token)
     if firebase_info:
         return get_or_create_user_from_firebase(db, firebase_info)
 
-    # Legacy token fallback (e.g. for existing automated test suite compatibility)
+    # 4. Legacy token fallback (e.g. for existing automated test suite compatibility)
     payload = decode_access_token(token)
     if payload and payload.get("sub"):
         try:
@@ -216,6 +248,10 @@ def get_current_user_from_token(
     """Validates an authentication token supplied outside FastAPI dependency injection."""
     if not token:
         return None
+
+    api_user = get_user_from_api_key(token, db)
+    if api_user:
+        return api_user
 
     firebase_info = verify_firebase_id_token(token)
     if firebase_info:
