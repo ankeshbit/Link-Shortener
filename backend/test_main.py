@@ -1,8 +1,11 @@
 import os
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
+import models
 import pytest
 from fastapi.testclient import TestClient
 
@@ -761,3 +764,233 @@ def test_max_clicks_atomic_concurrency_cache_and_db():
     # 13th request must also be refused
     res_over = client.get(f"/{alias}", follow_redirects=False)
     assert "no longer active" in res_over.text
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_stream_producer_and_worker_batch_ack():
+    """Verifies that redirect writes to Redis Streams and worker processes, increments, and XACKs."""
+    import worker
+    from database import SessionLocal
+
+    token = register_token("worker_user_1")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"strm_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/stream-dest", "custom_alias": alias},
+        headers=headers,
+    )
+
+    r = worker.get_redis_client()
+    try:
+        r.delete(worker.STREAM_NAME)
+        r.xgroup_destroy(worker.STREAM_NAME, worker.GROUP_NAME)
+    except Exception:
+        pass
+    worker.ensure_consumer_group(r)
+
+    # 1. Trigger redirect -> Producer pushes to stream:clicks
+    res = client.get(f"/{alias}", follow_redirects=False)
+    assert res.status_code in [301, 302, 303, 307]
+
+    # 2. Read from stream via worker consumer group
+    msgs = r.xreadgroup(
+        worker.GROUP_NAME,
+        "test-consumer",
+        {worker.STREAM_NAME: ">"},
+        count=50,
+        block=1000,
+    )
+    assert msgs, "Expected at least 1 message in stream:clicks"
+
+    stream_name, stream_messages = msgs[0]
+    matching = [m for m in stream_messages if m[1].get("short_id") == alias]
+    assert len(matching) >= 1
+
+    # 3. Process batch with worker
+    with SessionLocal() as db:
+        processed_count = worker.process_messages_batch(r, matching, db)
+        assert processed_count >= 1
+
+        # Check DB clicks_count
+        u = db.query(models.URL).filter_by(short_id=alias).first()
+        assert u.clicks_count >= 1
+
+    # 4. Verify message is XACKed (pending count for matching ids is 0)
+    pending = r.xpending_range(
+        worker.STREAM_NAME, worker.GROUP_NAME, min="-", max="+", count=100
+    )
+    pending_ids = [p["message_id"] for p in pending]
+    for msg_id, _ in matching:
+        assert msg_id not in pending_ids, f"Message {msg_id} was not XACKed"
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_worker_dedup_on_retry():
+    """Verifies that at-least-once re-delivery of the same event_id is deduplicated."""
+    import worker
+    from database import SessionLocal
+
+    token = register_token("worker_user_2")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"dedup_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/dedup-dest", "custom_alias": alias},
+        headers=headers,
+    )
+
+    r = worker.get_redis_client()
+    worker.ensure_consumer_group(r)
+    unique_event_id = f"evt_{uuid.uuid4().hex}"
+
+    msg_data = {
+        "event_id": unique_event_id,
+        "short_id": alias,
+        "ip": "127.0.0.1",
+        "user_agent": "k6-test-agent",
+        "increment_clicks": "1",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Add message to stream
+    msg_id = r.xadd(worker.STREAM_NAME, msg_data)
+
+    with SessionLocal() as db:
+        # First execution -> processes 1 click
+        c1 = worker.process_messages_batch(r, [(msg_id, msg_data)], db)
+        assert c1 == 1
+        u1 = db.query(models.URL).filter_by(short_id=alias).first()
+        initial_clicks = u1.clicks_count
+
+        # Second execution with same event_id -> deduplicated (0 clicks processed)
+        c2 = worker.process_messages_batch(r, [(msg_id, msg_data)], db)
+        assert c2 == 0
+        db.refresh(u1)
+        assert (
+            u1.clicks_count == initial_clicks
+        ), "Duplicate event must not increment clicks_count"
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_worker_dead_letter_cap_retries():
+    """Verifies that messages exceeding MAX_RETRIES are routed to dead letter stream and XACKed."""
+    import worker
+
+    r = worker.get_redis_client()
+    worker.ensure_consumer_group(r)
+    dead_event_id = f"poison_{uuid.uuid4().hex}"
+    msg_data = {
+        "event_id": dead_event_id,
+        "short_id": "nonexistent_dead_link",
+        "ip": "1.2.3.4",
+        "user_agent": "PoisonPill",
+    }
+    msg_id = r.xadd(worker.STREAM_NAME, msg_data)
+
+    # Simulate retries up to MAX_RETRIES + 1
+    for _ in range(worker.MAX_RETRIES):
+        routed = worker.check_and_handle_dead_letter(r, dead_event_id, msg_id, msg_data)
+        assert not routed
+
+    # Next attempt crosses threshold
+    routed = worker.check_and_handle_dead_letter(r, dead_event_id, msg_id, msg_data)
+    assert routed is True
+
+    # Verify message was routed to DEAD_LETTER_STREAM
+    dead_msgs = r.xrevrange(worker.DEAD_LETTER_STREAM, count=10)
+    found = any(m[1].get("event_id") == dead_event_id for m in dead_msgs)
+    assert found, "Message was not found in dead letter stream"
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_worker_stale_pending_reclaim_crash_recovery():
+    """Verifies that unacknowledged messages from a dead consumer are reclaimed and processed."""
+    import worker
+    from database import SessionLocal
+
+    token = register_token("worker_user_3")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"crash_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/crash-dest", "custom_alias": alias},
+        headers=headers,
+    )
+
+    r = worker.get_redis_client()
+    crash_stream = f"test:stream:crash:{os.urandom(4).hex()}"
+    crash_group = "crash_grp"
+    r.xgroup_create(crash_stream, crash_group, id="$", mkstream=True)
+    event_id = f"crash_evt_{uuid.uuid4().hex}"
+    msg_id = r.xadd(
+        crash_stream,
+        {
+            "event_id": event_id,
+            "short_id": alias,
+            "ip": "127.0.0.1",
+            "user_agent": "CrashTester",
+            "increment_clicks": "1",
+        },
+    )
+
+    # Dead consumer reads it but crashes without ACK
+    r.xreadgroup(crash_group, "dead-consumer", {crash_stream: ">"}, count=1)
+
+    # Recovering consumer reclaims it (with min_idle_ms=0 for test)
+    reclaimed = worker.reclaim_pending_messages(
+        r,
+        crash_stream,
+        crash_group,
+        "alive-consumer",
+        min_idle_ms=0,
+        count=10,
+    )
+    assert any(
+        m[0] == msg_id for m in reclaimed
+    ), "Dead consumer message was not reclaimed"
+
+    with SessionLocal() as db:
+        count = worker.process_messages_batch(
+            r, reclaimed, db, stream_name=crash_stream, group_name=crash_group
+        )
+        assert count >= 1
+        u = db.query(models.URL).filter_by(short_id=alias).first()
+        assert u.clicks_count >= 1
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_redirect_fallback_to_in_process_when_redis_fails():
+    """Verifies that redirect falls back to in-process click tracking when Redis Streams XADD fails."""
+    token = register_token("fallback_user")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"flbk_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={
+            "target_url": "https://example.com/fallback-target",
+            "custom_alias": alias,
+        },
+        headers=headers,
+    )
+
+    # Mock redis_cache.client.xadd to raise an error
+    with patch.object(
+        redis_cache.client,
+        "xadd",
+        side_effect=Exception("Redis stream connection dropped"),
+    ):
+        res = client.get(f"/{alias}", follow_redirects=False)
+        # Redirect succeeds despite Redis stream failure!
+        assert res.status_code in [301, 302, 303, 307]
+        assert res.headers["location"] == "https://example.com/fallback-target"

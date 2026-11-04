@@ -4,6 +4,7 @@ import os
 import secrets
 import string
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,6 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import models
+import redis
 import security
 
 # Local imports
@@ -45,6 +47,38 @@ load_dotenv()
 loop = None
 
 
+async def redis_ws_pubsub_listener():
+    """Listens for real-time analytics updates published by worker.py and broadcasts over WebSockets."""
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url or redis is None:
+        return
+    try:
+        r = redis.from_url(redis_url, decode_responses=True, protocol=2)
+        pubsub = r.pubsub()
+        pubsub.subscribe("channel:ws:clicks")
+        logger.info("Subscribed to channel:ws:clicks for worker analytics broadcasts.")
+        while True:
+            msg = await asyncio.to_thread(
+                pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0
+            )
+            if msg and msg.get("type") == "message":
+                try:
+                    payload = json.loads(msg["data"])
+                    s_id = payload.get("short_id")
+                    stats = payload.get("stats")
+                    if s_id and stats:
+                        await manager.broadcast(
+                            s_id, {"type": "click_update", "data": stats}
+                        )
+                except Exception as parse_err:
+                    logger.warning(f"Error parsing PubSub message: {parse_err}")
+            await asyncio.sleep(0.01)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"WebSocket Redis PubSub listener stopped: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global loop
@@ -73,7 +107,9 @@ async def lifespan(app: FastAPI):
             f"Redis connection verification failed: {e}. Running in degraded mode."
         )
 
+    ws_task = asyncio.create_task(redis_ws_pubsub_listener())
     yield
+    ws_task.cancel()
 
     logger.info("FastAPI application shutting down...")
 
@@ -1015,7 +1051,31 @@ def redirect_url(
 
     user_agent = request.headers.get("user-agent", "Unknown")
     ip = get_client_ip(request)
-    background_tasks.add_task(track_click, short_id, user_agent, ip, increment_clicks)
+
+    stream_pushed = False
+    try:
+        if redis_cache.client:
+            redis_cache.client.xadd(
+                "stream:clicks",
+                {
+                    "event_id": uuid.uuid4().hex,
+                    "short_id": short_id,
+                    "ip": ip,
+                    "user_agent": user_agent,
+                    "increment_clicks": "1" if increment_clicks else "0",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            stream_pushed = True
+    except Exception as e:
+        logger.warning(
+            f"Could not push to Redis Stream ({e}); falling back to in-process."
+        )
+
+    if not stream_pushed:
+        background_tasks.add_task(
+            track_click, short_id, user_agent, ip, increment_clicks
+        )
 
     return RedirectResponse(url=target_url)
 
@@ -1085,8 +1145,32 @@ def verify_password_and_redirect(
         return HTMLResponse(get_html_template("Password Required", form))
 
     user_agent = request.headers.get("user-agent", "Unknown")
-    ip = request.client.host
-    background_tasks.add_task(track_click, short_id, user_agent, ip, increment_clicks)
+    ip = request.client.host if request.client else "127.0.0.1"
+
+    stream_pushed = False
+    try:
+        if redis_cache.client:
+            redis_cache.client.xadd(
+                "stream:clicks",
+                {
+                    "event_id": uuid.uuid4().hex,
+                    "short_id": short_id,
+                    "ip": ip,
+                    "user_agent": user_agent,
+                    "increment_clicks": "1" if increment_clicks else "0",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            stream_pushed = True
+    except Exception as e:
+        logger.warning(
+            f"Could not push to Redis Stream ({e}); falling back to in-process."
+        )
+
+    if not stream_pushed:
+        background_tasks.add_task(
+            track_click, short_id, user_agent, ip, increment_clicks
+        )
 
     return RedirectResponse(url=url.target_url, status_code=303)
 
