@@ -43,6 +43,9 @@ class URL(Base):
     clicks = relationship(
         "ClickEvent", back_populates="url", cascade="all, delete-orphan"
     )
+    reports = relationship(
+        "LinkReport", back_populates="url", cascade="all, delete-orphan"
+    )
 
 
 class ClickEvent(Base):
@@ -62,3 +65,19 @@ class ClickEvent(Base):
     clicked_at = Column(DateTime(timezone=True), server_default=func.now())
 
     url = relationship("URL", back_populates="clicks")
+
+
+class LinkReport(Base):
+    __tablename__ = "link_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"), nullable=False)
+    reporter_ip = Column(String(50), nullable=False)
+    reason = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        sa.UniqueConstraint("url_id", "reporter_ip", name="uq_link_reports_url_ip"),
+    )
+
+    url = relationship("URL", back_populates="reports")

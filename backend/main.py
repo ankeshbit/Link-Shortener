@@ -1,7 +1,9 @@
 import asyncio
+import ipaddress
 import json
 import os
 import secrets
+import socket
 import string
 import time
 import uuid
@@ -29,6 +31,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -156,7 +159,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={
             "status": "error",
             "message": "Validation failed",
-            "errors": exc.errors(),
+            "errors": jsonable_encoder(exc.errors()),
         },
     )
 
@@ -471,6 +474,85 @@ def track_click(short_id: str, user_agent: str, ip: str, increment_clicks: bool 
 
 
 # Pydantic schemas
+def get_url_blocklist() -> set[str]:
+    blocked = set()
+    env_blocklist = os.getenv("URL_BLOCKLIST", "")
+    for host in env_blocklist.split(","):
+        h = host.strip().lower()
+        if h:
+            blocked.add(h)
+
+    file_path = os.getenv("URL_BLOCKLIST_FILE")
+    if file_path and os.path.isfile(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    h = line.strip().lower()
+                    if h and not h.startswith("#"):
+                        blocked.add(h)
+        except Exception as e:
+            logger.warning(f"Failed to read blocklist file {file_path}: {e}")
+
+    return blocked
+
+
+def is_ip_private_or_loopback(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local
+    except ValueError:
+        return False
+
+
+def validate_target_url_safety(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("target_url must be an absolute HTTP(S) URL")
+
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        raise ValueError("Invalid target URL: missing hostname")
+
+    # 1. Reject service's own domain
+    own_host = (urlsplit(PUBLIC_BASE_URL).hostname or "").strip().lower()
+    if own_host and hostname == own_host:
+        raise ValueError(
+            f"Cannot shorten URLs pointing to ByteLink's own domain ({own_host})"
+        )
+
+    # 2. Reject localhost
+    if hostname in {"localhost", "localhost.localdomain"}:
+        raise ValueError("Cannot shorten URLs pointing to localhost")
+
+    # 3. Reject direct private or loopback IP addresses
+    if is_ip_private_or_loopback(hostname):
+        raise ValueError(
+            "Cannot shorten URLs pointing to private or loopback IP addresses"
+        )
+
+    # 4. Check DNS resolution for private IP SSRF prevention
+    try:
+        resolved_ips = socket.getaddrinfo(hostname, None)
+        for entry in resolved_ips:
+            sockaddr = entry[4]
+            ip_candidate = sockaddr[0]
+            if is_ip_private_or_loopback(ip_candidate):
+                raise ValueError(
+                    "Target hostname resolves to a private or loopback IP address"
+                )
+    except socket.gaierror:
+        pass
+
+    # 5. Check against blocklist
+    blocklist = get_url_blocklist()
+    if hostname in blocklist or any(hostname.endswith("." + b) for b in blocklist):
+        raise ValueError(
+            f"Target host '{hostname}' is blocked due to abuse or malicious content"
+        )
+
+    return value
+
+
 class URLCreate(BaseModel):
     target_url: str
     custom_alias: Optional[str] = None
@@ -481,10 +563,7 @@ class URLCreate(BaseModel):
     @field_validator("target_url")
     @classmethod
     def validate_target_url(cls, value: str) -> str:
-        parsed = urlsplit(value)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("target_url must be an absolute HTTP(S) URL")
-        return value
+        return validate_target_url_safety(value)
 
 
 class URLUpdate(BaseModel):
@@ -501,9 +580,7 @@ class URLUpdate(BaseModel):
     @classmethod
     def validate_target_url(cls, value: Optional[str]) -> Optional[str]:
         if value is not None:
-            parsed = urlsplit(value)
-            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-                raise ValueError("target_url must be an absolute HTTP(S) URL")
+            return validate_target_url_safety(value)
         return value
 
     @field_validator("max_clicks")
@@ -873,6 +950,66 @@ def get_metrics():
         "cache_hits": hits,
         "cache_misses": misses,
         "cache_hit_rate": round(hit_rate, 4),
+    }
+
+
+class ReportCreate(BaseModel):
+    reason: Optional[str] = "abuse"
+
+
+@app.post("/api/report/{short_id}", dependencies=[Depends(rate_limit)])
+def report_abuse(
+    short_id: str,
+    request: Request,
+    item: Optional[ReportCreate] = None,
+    db: Session = Depends(get_db),
+):
+    url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Link not found",
+        )
+
+    reporter_ip = get_client_ip(request)
+    reason = item.reason if item else "abuse"
+
+    # Distinct report insertion (ignored if already reported by this IP)
+    try:
+        report = models.LinkReport(
+            url_id=url.id,
+            reporter_ip=reporter_ip,
+            reason=reason,
+        )
+        db.add(report)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+
+    distinct_count = (
+        db.query(models.LinkReport).filter(models.LinkReport.url_id == url.id).count()
+    )
+
+    threshold = int(os.getenv("REPORT_AUTO_DISABLE_THRESHOLD", "5"))
+    if distinct_count >= threshold and url.is_active:
+        url.is_active = False
+        db.commit()
+        db.refresh(url)
+        try:
+            redis_cache.delete(f"url:{short_id}", f"url:{short_id}:clicks")
+        except Exception as e:
+            logger.warning(
+                f"Could not clear cache for auto-disabled link {short_id}: {e}"
+            )
+        logger.warning(
+            f"Link {short_id} automatically disabled after {distinct_count} distinct abuse reports."
+        )
+
+    return {
+        "status": "reported",
+        "short_id": short_id,
+        "distinct_reports": distinct_count,
+        "is_active": url.is_active,
     }
 
 

@@ -994,3 +994,144 @@ def test_redirect_fallback_to_in_process_when_redis_fails():
         # Redirect succeeds despite Redis stream failure!
         assert res.status_code in [301, 302, 303, 307]
         assert res.headers["location"] == "https://example.com/fallback-target"
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_abuse_url_validation_rejection_cases():
+    """Asserts that target URLs pointing to own domain, localhost, private IPs, or blocklist are rejected."""
+    token = register_token("abuse_test_user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    from main import PUBLIC_BASE_URL
+
+    # 1. Own domain rejection
+    res_own = client.post(
+        "/api/shorten",
+        json={"target_url": f"{PUBLIC_BASE_URL}/internal-route"},
+        headers=headers,
+    )
+    assert res_own.status_code in [400, 422]
+    assert "own domain" in res_own.text
+
+    # 2. Localhost rejection
+    res_lh1 = client.post(
+        "/api/shorten",
+        json={"target_url": "http://localhost:8000/api/admin"},
+        headers=headers,
+    )
+    assert res_lh1.status_code in [400, 422]
+
+    res_lh2 = client.post(
+        "/api/shorten",
+        json={"target_url": "http://127.0.0.1:8000/secret"},
+        headers=headers,
+    )
+    assert res_lh2.status_code in [400, 422]
+
+    # 3. Private IP ranges (RFC 1918)
+    for priv_ip in ["10.0.0.1", "192.168.1.254", "172.16.0.5"]:
+        res_priv = client.post(
+            "/api/shorten",
+            json={"target_url": f"http://{priv_ip}/console"},
+            headers=headers,
+        )
+        assert res_priv.status_code in [400, 422]
+        assert "private or loopback" in res_priv.text
+
+    # 4. Host in configurable blocklist
+    with patch.dict(os.environ, {"URL_BLOCKLIST": "phishing-bank.com,malware-hub.org"}):
+        res_blocked = client.post(
+            "/api/shorten",
+            json={"target_url": "https://phishing-bank.com/login"},
+            headers=headers,
+        )
+        assert res_blocked.status_code in [400, 422]
+        assert "blocked" in res_blocked.text
+
+        # Subdomain of blocked domain is also blocked
+        res_sub_blocked = client.post(
+            "/api/shorten",
+            json={"target_url": "https://secure.malware-hub.org/download"},
+            headers=headers,
+        )
+        assert res_sub_blocked.status_code in [400, 422]
+
+    # 5. Public valid URL must succeed
+    res_valid = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/safe-page"},
+        headers=headers,
+    )
+    assert res_valid.status_code == 200
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_report_abuse_auto_disable_threshold():
+    """Asserts that N distinct reports auto-disable the short link and invalidate cache."""
+    token = register_token("reporter_owner")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"rep_{os.urandom(4).hex()}"
+
+    # 1. Create active link
+    create_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/abuse-target", "custom_alias": alias},
+        headers=headers,
+    )
+    assert create_res.status_code == 200
+
+    # 2. Redirect works initially
+    res_init = client.get(f"/{alias}", follow_redirects=False)
+    assert res_init.status_code in [301, 302, 303, 307]
+
+    with patch.dict(os.environ, {"REPORT_AUTO_DISABLE_THRESHOLD": "3"}):
+        # Report 1 from IP A
+        rep1 = client.post(
+            f"/api/report/{alias}",
+            json={"reason": "phishing"},
+            headers={"X-Forwarded-For": "198.51.100.1"},
+        )
+        assert rep1.status_code == 200
+        assert rep1.json()["distinct_reports"] == 1
+        assert rep1.json()["is_active"] is True
+
+        # Duplicate Report from same IP A (must be ignored, not incremented)
+        rep1_dup = client.post(
+            f"/api/report/{alias}",
+            json={"reason": "scam"},
+            headers={"X-Forwarded-For": "198.51.100.1"},
+        )
+        assert rep1_dup.status_code == 200
+        assert rep1_dup.json()["distinct_reports"] == 1
+        assert rep1_dup.json()["is_active"] is True
+
+        # Report 2 from IP B
+        rep2 = client.post(
+            f"/api/report/{alias}",
+            json={"reason": "malware"},
+            headers={"X-Forwarded-For": "198.51.100.2"},
+        )
+        assert rep2.status_code == 200
+        assert rep2.json()["distinct_reports"] == 2
+        assert rep2.json()["is_active"] is True
+
+        # Report 3 from IP C (reaches threshold of 3 -> auto-disabled!)
+        rep3 = client.post(
+            f"/api/report/{alias}",
+            json={"reason": "impersonation"},
+            headers={"X-Forwarded-For": "198.51.100.3"},
+        )
+        assert rep3.status_code == 200
+        assert rep3.json()["distinct_reports"] == 3
+        assert rep3.json()["is_active"] is False
+
+    # 3. Subsequent redirect must be refused (inactive link page)
+    res_disabled = client.get(f"/{alias}", follow_redirects=False)
+    assert res_disabled.status_code == 200
+    assert (
+        "Link Expired" in res_disabled.text or "no longer active" in res_disabled.text
+    )
