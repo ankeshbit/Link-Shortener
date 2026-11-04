@@ -1,6 +1,80 @@
 # ByteLink — Premium Full-Stack URL Shortener & Live Analytics
 
-ByteLink is a production-grade, full-stack URL Shortener application built with modern web technologies. It provides instantaneous link redirections, custom alias creations, password lock protections, user authentication dashboards, and real-time geographical analytics streaming via WebSockets.m
+ByteLink is a production-grade, full-stack URL Shortener application built with modern web technologies. It provides instantaneous link redirections, custom alias creations, password lock protections, user authentication dashboards, and real-time geographical analytics streaming via WebSockets.
+
+## Live Demo
+
+- **Web Application**: [https://bytelink-demo.example.com](https://bytelink-demo.example.com) *(Recruiter Demo Placeholder — update with your deployed URL)*
+- **Interactive API Docs (Swagger UI)**: [https://bytelink-demo.example.com/docs](https://bytelink-demo.example.com/docs)
+- **Live System Metrics Endpoint**: [https://bytelink-demo.example.com/api/metrics](https://bytelink-demo.example.com/api/metrics)
+
+---
+
+## System Architecture
+
+```mermaid
+flowchart TD
+    subgraph Clients["Clients & Presentation"]
+        User["Browser Client"]
+        DevClient["API / CLI Client"]
+        WSClient["Analytics Dashboard (WebSocket)"]
+    end
+
+    subgraph API["FastAPI Application (main.py)"]
+        RateLimit["Sliding-Window Limiter\n(Atomic Lua Script)"]
+        RedirectEP["GET /:short_id\n(Redirect Handler)"]
+        ShortenEP["POST /api/shorten\n(Collision-Safe Creator)"]
+        APIKeyEP["API Key Auth & Management"]
+        PubSubListener["Redis Pub/Sub Listener Task"]
+    end
+
+    subgraph CacheLayer["In-Memory Cache & Message Broker (Redis)"]
+        RedisCache["Redis URL Cache & ZSET Rate Limiters"]
+        RedisMetrics["Redirect Counters & Metrics"]
+        RedisStream["Redis Streams (stream:clicks)\n+ Dead-Letter Stream"]
+        RedisPubSub["Redis Pub/Sub (channel:ws:clicks)"]
+    end
+
+    subgraph Storage["Relational Storage (PostgreSQL 18)"]
+        PostgresDB[("PostgreSQL\n- users & api_keys\n- urls (max_clicks, active)\n- click_events\n- link_reports")]
+    end
+
+    subgraph WorkerService["Asynchronous Analytics Worker (worker.py)"]
+        WorkerConsumer["Consumer Group Reader\n(XREADGROUP / XAUTOCLAIM)"]
+        GeoUAParser["GeoIP & User-Agent Parser"]
+        BatchWriter["Batch Inserter & Deduplicator\n(At-Least-Once Guarantee)"]
+    end
+
+    %% Redirect Flow
+    User -->|1. GET /:short_id| RateLimit
+    RateLimit -->|Check rolling window| RedisCache
+    RateLimit -->|Allowed| RedirectEP
+    RedirectEP -->|2. Fast Cache Lookup| RedisCache
+    RedirectEP -.->|Cache Miss Fallback| PostgresDB
+    RedirectEP -->|3. Non-blocking XADD| RedisStream
+    RedirectEP -->|4. Increment hit/miss metrics| RedisMetrics
+    RedirectEP -->|5. 302 Redirect Location| User
+
+    %% Shorten Flow
+    DevClient -->|POST /api/shorten\n(Bearer / X-API-Key)| ShortenEP
+    ShortenEP -->|Auth check| PostgresDB
+    ShortenEP -->|Optimistic Insert + Retry on Conflict| PostgresDB
+    ShortenEP -->|Populate Cache| RedisCache
+
+    %% Async Worker Stream Processing Flow
+    RedisStream -->|6. Batch Read| WorkerConsumer
+    WorkerConsumer --> GeoUAParser
+    GeoUAParser --> BatchWriter
+    BatchWriter -->|7. Batch INSERT & atomic counter| PostgresDB
+    BatchWriter -->|8. XACK / Retry / Dead-Letter| RedisStream
+    BatchWriter -->|9. Publish Live Click Update| RedisPubSub
+
+    %% WebSocket Flow
+    RedisPubSub -->|Pub/Sub Message| PubSubListener
+    PubSubListener -->|Live Broadcast| WSClient
+```
+
+---
 
 ## Run locally
 
@@ -206,6 +280,85 @@ ByteLink supports configurable HTTP redirect status codes via the `REDIRECT_STAT
 
 ---
 
+## System Capacity & Resource Estimates
+
+### Workload Assumptions & Traffic Profile
+- **Read-to-Write Ratio**: 10:1 (read-heavy, representative of high-throughput URL shortening services).
+- **Target Traffic**:
+  - Average Read QPS: **1,000 req/s** (~86.4M redirects/day)
+  - Average Write QPS: **100 req/s** (~8.64M links created/day)
+  - Peak Read Traffic (2x headroom): **2,000 req/s**
+
+### Storage Footprint per Record
+1. **URL Record (`urls` table)**:
+   - Primary Key `id`: 4 bytes
+   - `short_id` VARCHAR(50): ~10 bytes avg
+   - `target_url` VARCHAR: ~150 bytes avg
+   - `clicks_count` INT: 4 bytes
+   - `created_at` / `expires_at` TIMESTAMP: 16 bytes
+   - `password` SHA-256 hash: 64 bytes
+   - `max_clicks` INT, `is_active` BOOL, `user_id` INT: 9 bytes
+   - Row overhead + B-tree indexes (`short_id` unique, `user_id`): ~150 bytes
+   - **Total per URL**: $\approx 500\text{ bytes}$
+
+2. **Click Event Record (`click_events` table)**:
+   - `id`: 4 bytes
+   - `url_id` INT: 4 bytes
+   - `ip_address` VARCHAR(50): ~15 bytes
+   - `country`, `city` VARCHAR(50): ~30 bytes
+   - `lat`, `lon` FLOAT: 16 bytes
+   - `user_agent`, `browser`, `os`, `device`: ~100 bytes
+   - `clicked_at` TIMESTAMP: 8 bytes
+   - Row overhead + Foreign Key index: ~80 bytes
+   - **Total per Click Event**: $\approx 257\text{ bytes} \approx 250\text{ bytes}$
+
+### Annual Storage Growth Projections
+- **URLs**: $10,000,000\text{ links/year} \times 500\text{ bytes} \approx 5.0\text{ GB/year}$
+- **Clicks**: $100,000,000\text{ clicks/year} \times 250\text{ bytes} \approx 25.0\text{ GB/year}$
+- **Total Relational Database Storage**: $\approx 30.0\text{ GB/year}$ (readily accommodates cost-effective managed NVMe storage).
+
+### In-Memory Redis Cache Budget (80/20 Pareto Working Set)
+- Following the Pareto Principle, 20% of short links generate 80% of total redirect volume.
+- In-memory working set for 2,000,000 hot URLs:
+  $$2,000,000 \times 500\text{ bytes} \approx 1.0\text{ GB RAM}$$
+- Redis Stream buffer (`stream:clicks` trimmed with `MAXLEN ~ 100,000` entries): $\approx 50\text{ MB RAM}$.
+- Total Redis memory footprint: **$\le 2\text{ GB}$**, fitting comfortably on entry-level cloud cache tiers.
+
+---
+
+## Design Decisions & Trade-Offs
+
+### 1. Redis Streams Worker vs. Heavyweight Message Broker (Kafka / Celery / RabbitMQ)
+- **Decision**: Decoupled consumer group worker (`backend/worker.py`) running on Redis Streams (`stream:clicks`).
+- **Rationale**: URL redirect latency must remain sub-50ms. Processing GeoIP resolution, user-agent parsing, and PostgreSQL writes synchronously inside the redirect handler degrades throughput and exhausts DB connection pools under load.
+- **Trade-Off**: Rather than introducing an entirely new operational dependency (e.g. Kafka or RabbitMQ with Celery workers), Redis Streams leverages the existing Redis infrastructure. It provides at-least-once delivery, consumer groups, consumer failure recovery (`XAUTOCLAIM`/`XCLAIM`), batching, and dead-letter queues (`stream:clicks:dead`) with sub-millisecond `XADD` write latency.
+
+### 2. Sliding-Window Rate Limiting via Redis Sorted Sets & Atomic Lua
+- **Decision**: Sorted set (ZSET) timestamp scoring inside an atomic Lua script.
+- **Rationale**: Standard fixed-window counter limiters are vulnerable to traffic spikes (up to 2x configured limit) at the boundaries of time windows.
+- **Trade-Off**: Storing individual request timestamps in a ZSET uses slightly more Redis memory than a single integer counter, but completely eliminates boundary burst vulnerability while atomic Lua execution avoids multi-command round-trip race conditions.
+
+### 3. HTTP Redirect Status Codes: 302 Found vs. 301 Moved Permanently
+- **Decision**: Configurable via `REDIRECT_STATUS_CODE`, defaulting to `302 Found`. `HEAD` requests match symmetrically.
+- **Trade-Off**:
+  - `301 Moved Permanently` allows client browsers to aggressively cache target URLs on disk, reducing subsequent server requests. However, it blinds the analytics engine to repeat clicks and prevents real-time enforcement of link deactivations, edits, or `max_clicks` limits.
+  - `302 Found` forces browsers to re-query ByteLink on every click, guaranteeing 100% accurate geolocation tracking, rate limiting, and instant control over link lifecycle.
+
+### 4. Optimistic Insertion with Retry on Conflict vs. Check-Then-Insert
+- **Decision**: Rely on PostgreSQL's atomic `UNIQUE` constraint on `short_id`, catching `IntegrityError` to retry on rare collisions.
+- **Rationale**: "Check-then-insert" (`SELECT` then `INSERT`) suffers from concurrency race conditions and incurs an unnecessary database `SELECT` round-trip on every single link creation.
+- **Trade-Off**: In our $62^7 \approx 3.52\text{ trillion}$ keyspace, the probability of collision is less than 0.003% even with 100M links. Optimistic insert executes in a single database operation for 99.997%+ of requests while guaranteeing absolute correctness under concurrency.
+
+### 5. Cryptographically Hashed API Keys (SHA-256)
+- **Decision**: Store only `hashlib.sha256(raw_key).hexdigest()` in PostgreSQL; show the raw secret key (`bl_live_...`) to the user exactly once upon generation.
+- **Trade-Off**: Keys cannot be retrieved or recovered if lost (users must generate a new key), but compromised database snapshots or SQL injections expose zero plaintext credentials.
+
+### 6. Fail-Open Architecture for Redis Outages
+- **Decision**: In the event of Redis downtime, rate limiting, caching, and stream ingestion gracefully fail open.
+- **Rationale**: Transient cache failures must never prevent legitimate end users from reaching their destination links. Redirection falls back transparently to direct PostgreSQL lookups and in-process background tasks.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -235,7 +388,7 @@ Link-Shortener/
 │   ├── models.py               # ORM models for PostgreSQL
 │   ├── security.py             # JWT token management & direct bcrypt hashing
 │   ├── redis_client.py         # SafeRedisClient with in-memory MockRedis fallback
-│   ├── test_main.py            # Pytest unit tests (10 tests)
+│   ├── test_main.py            # Pytest unit and integration tests (37 tests)
 │   ├── requirements.txt        # Modernized Python dependency stack
 │   ├── runtime.txt             # Pins Python 3.11.11 for Render
 │   ├── Dockerfile              # Slim Python 3.11 Docker image
@@ -310,7 +463,7 @@ DATABASE_URL=postgresql://USER:PASSWORD@EP-example-pooler.us-east-2.aws.neon.tec
 REDIS_URL=rediss://default:password@host:6379
 
 # JWT signing secret (generate a strong random key in production)
-# JWT_SECRET must be configured in the backend environment.
+JWT_SECRET=<YOUR_SECURE_RANDOM_JWT_SECRET>
 
 # JWT algorithm
 ALGORITHM=HS256
@@ -438,14 +591,20 @@ npm run build
 pytest backend/
 ```
 
-Runs 10 tests covering:
-- User registration & login
-- Invalid email validation
-- URL shortening (anonymous + authenticated)
-- Custom alias creation & conflict detection
-- Password-protected links
-- Health check endpoint
-- Root landing endpoint
+Runs 37 comprehensive unit and integration tests covering:
+- User registration, login, and token refreshing (JWT + direct bcrypt)
+- Malformed payloads and invalid email validation
+- URL shortening with optimistic concurrency and retry on collision
+- Custom alias creation, unique constraint enforcement, and conflict detection
+- Password-protected links and SHA-256 pre-hashing
+- Sliding-window rate limiting (atomic Redis sorted sets + Lua script) and fail-open resilience
+- Link lifecycle management: `max_clicks` atomic enforcement (cache and DB paths), link editing, and disablement
+- Durable async click analytics via Redis Streams producer/consumer, worker batching, deduplication, and dead-letter queues
+- Abuse protection: SSRF rejection (localhost, private RFC 1918 IPs, public base URL host) and configurable domain blocklist
+- Abuse reporting: distinct IP report aggregation and automatic link deactivation threshold
+- Configurable redirect status codes (default 302, 301 override) and symmetrical HEAD request handling
+- API key lifecycle: creation, SHA-256 hashed storage, listing, Bearer/X-API-Key auth, and revocation
+- Health check and API root landing metadata endpoints
 
 ---
 
