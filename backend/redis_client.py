@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -10,6 +11,32 @@ try:
     import redis
 except ImportError:
     redis = None
+
+SLIDING_WINDOW_LUA = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+
+local clear_before = now - window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', clear_before)
+local current_count = redis.call('ZCARD', key)
+
+if current_count < limit then
+    redis.call('ZADD', key, now, member)
+    redis.call('EXPIRE', key, math.ceil(window) + 1)
+    return {1, limit - current_count - 1, 0}
+else
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local retry_after = math.ceil(window)
+    if oldest and #oldest >= 2 then
+        local oldest_time = tonumber(oldest[2])
+        retry_after = math.max(1, math.ceil(oldest_time + window - now))
+    end
+    return {0, 0, retry_after}
+end
+"""
 
 
 class SafeRedisClient:
@@ -88,6 +115,9 @@ class SafeRedisClient:
     def expire(self, key, seconds):
         return self._execute("expire", key, seconds)
 
+    def delete(self, *keys):
+        return self._execute("delete", *keys)
+
     def ping(self) -> bool:
         if self._should_attempt_reconnect():
             self._init_client()
@@ -98,6 +128,44 @@ class SafeRedisClient:
                 self.client = None
                 return False
         return False
+
+    def sliding_window_rate_limit(
+        self, key: str, window_seconds: float, limit: int
+    ) -> tuple[bool, int, int]:
+        """
+        Sliding-window rate limiter using a Redis sorted set updated atomically via Lua.
+        Returns: (allowed, remaining, retry_after)
+        Fails open if Redis is down or encounters an error.
+        """
+        if self._should_attempt_reconnect():
+            self._init_client()
+
+        if not self.client:
+            return True, limit, 0
+
+        now = time.time()
+        member = f"{now}:{uuid.uuid4().hex[:8]}"
+
+        try:
+            res = self.client.eval(
+                SLIDING_WINDOW_LUA,
+                1,
+                key,
+                str(now),
+                str(window_seconds),
+                str(limit),
+                member,
+            )
+            if res and len(res) >= 3:
+                return bool(res[0]), int(res[1]), int(res[2])
+            return True, limit, 0
+        except Exception as e:
+            logger.warning(
+                f"Sliding window rate limit operation failed ({e}); failing open."
+            )
+            self.client = None
+            self.last_reconnect_attempt = time.time()
+            return True, limit, 0
 
 
 # Global Singleton Client instance

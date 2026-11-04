@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from unittest.mock import patch
 
 import pytest
@@ -457,3 +458,129 @@ def test_metrics_fail_open_on_redis_error():
         assert data["cache_hits"] == 0
         assert data["cache_misses"] == 0
         assert data["cache_hit_rate"] == 0.0
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_redirect_sliding_window_rate_limit_enforced():
+    """Verifies that sliding-window rate limiting returns 429 with Retry-After when limit is exceeded."""
+    headers = {"Authorization": f"Bearer {register_token('rl_user_1')}"}
+    alias = f"rl_enforce_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/rl-1", "custom_alias": alias},
+        headers=headers,
+    )
+
+    client_ip = f"198.51.100.{os.urandom(1)[0]}"
+    req_headers = {"X-Forwarded-For": client_ip}
+
+    with patch.dict(
+        os.environ, {"REDIRECT_RATE_LIMIT": "3", "REDIRECT_RATE_WINDOW": "60"}
+    ):
+        # 3 requests should succeed
+        for _ in range(3):
+            res = client.get(f"/{alias}", headers=req_headers, follow_redirects=False)
+            assert res.status_code in [301, 302, 303, 307]
+
+        # 4th request must be rejected with 429
+        res_blocked = client.get(
+            f"/{alias}", headers=req_headers, follow_redirects=False
+        )
+        assert res_blocked.status_code == 429
+        assert "Retry-After" in res_blocked.headers
+        retry_after = int(res_blocked.headers["Retry-After"])
+        assert retry_after >= 1
+        assert "Too many redirect requests" in res_blocked.json()["message"]
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_redirect_sliding_window_slides():
+    """Verifies that older requests slide out of the sliding window, allowing subsequent requests."""
+    headers = {"Authorization": f"Bearer {register_token('rl_user_2')}"}
+    alias = f"rl_slide_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/rl-slide", "custom_alias": alias},
+        headers=headers,
+    )
+
+    client_ip = f"198.51.100.{os.urandom(1)[0]}"
+    req_headers = {"X-Forwarded-For": client_ip}
+
+    # Window of 2 seconds, limit of 2 requests
+    with patch.dict(
+        os.environ, {"REDIRECT_RATE_LIMIT": "2", "REDIRECT_RATE_WINDOW": "2"}
+    ):
+        res1 = client.get(f"/{alias}", headers=req_headers, follow_redirects=False)
+        res2 = client.get(f"/{alias}", headers=req_headers, follow_redirects=False)
+        assert res1.status_code in [301, 302, 303, 307]
+        assert res2.status_code in [301, 302, 303, 307]
+
+        # 3rd request immediately fails
+        res3 = client.get(f"/{alias}", headers=req_headers, follow_redirects=False)
+        assert res3.status_code == 429
+
+        # Wait for the 2-second window to slide past
+        time.sleep(2.1)
+
+        # 4th request must now succeed
+        res4 = client.get(f"/{alias}", headers=req_headers, follow_redirects=False)
+        assert res4.status_code in [301, 302, 303, 307]
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_redirect_rate_limit_per_client_ip():
+    """Verifies rate limiting is isolated per client IP."""
+    headers = {"Authorization": f"Bearer {register_token('rl_user_3')}"}
+    alias = f"rl_ip_{os.urandom(4).hex()}"
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/rl-ip", "custom_alias": alias},
+        headers=headers,
+    )
+
+    ip_a = f"198.51.100.1{os.urandom(1)[0]}"
+    ip_b = f"198.51.100.2{os.urandom(1)[0]}"
+
+    with patch.dict(
+        os.environ, {"REDIRECT_RATE_LIMIT": "1", "REDIRECT_RATE_WINDOW": "60"}
+    ):
+        # IP A request 1 -> OK
+        res_a1 = client.get(
+            f"/{alias}", headers={"X-Forwarded-For": ip_a}, follow_redirects=False
+        )
+        assert res_a1.status_code in [301, 302, 303, 307]
+
+        # IP A request 2 -> 429
+        res_a2 = client.get(
+            f"/{alias}", headers={"X-Forwarded-For": ip_a}, follow_redirects=False
+        )
+        assert res_a2.status_code == 429
+
+        # IP B request 1 -> OK (not affected by IP A's quota)
+        res_b1 = client.get(
+            f"/{alias}", headers={"X-Forwarded-For": ip_b}, follow_redirects=False
+        )
+        assert res_b1.status_code in [301, 302, 303, 307]
+
+
+def test_sliding_window_fail_open_on_redis_error():
+    """Verifies that sliding window rate limiter safely fails open if Redis is down or errors."""
+    with patch.object(redis_cache, "client") as mock_client:
+        mock_client.eval.side_effect = Exception("Redis cluster unavailable")
+        # Direct method call fails open
+        allowed, rem, retry = redis_cache.sliding_window_rate_limit("test_key", 60, 5)
+        assert allowed is True
+        assert retry == 0
+
+    # Also verify redirect handler fails open
+    with patch("main.redis_cache.sliding_window_rate_limit", return_value=(True, 5, 0)):
+        res = client.get("/nonexistent_alias_failopen", follow_redirects=False)
+        # 404 because link doesn't exist, NOT 500 or 429
+        assert res.status_code == 404

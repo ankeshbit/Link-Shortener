@@ -144,7 +144,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         f"HTTP exception on {request.method} {request.url.path}: {exc.status_code} - {exc.detail}"
     )
     return JSONResponse(
-        status_code=exc.status_code, content={"status": "error", "message": exc.detail}
+        status_code=exc.status_code,
+        content={"status": "error", "message": exc.detail},
+        headers=exc.headers,
     )
 
 
@@ -321,18 +323,21 @@ def get_client_ip(request: Request) -> str:
 def rate_limit(request: Request):
     client_ip = get_client_ip(request)
     key = f"rate_limit:{client_ip}"
+    limit = int(os.getenv("AUTH_RATE_LIMIT", os.getenv("RATE_LIMIT", "10000")))
     try:
         current = redis_cache.incr(key)
         if current is None:
             return True
         if current == 1:
             redis_cache.expire(key, 60)
-        if current > 20:
+        if current > limit:
             logger.warning(f"IP {client_ip} exceeded rate limit.")
             raise HTTPException(
-                status_code=429,
-                detail="Too many requests. Rate limit is 20 requests per minute.",
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Too many requests. Rate limit is {limit} requests per minute.",
             )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"Rate limiting check failed: {e}")
     return True
@@ -459,7 +464,11 @@ class TokenRefreshRequest(BaseModel):
     refresh_token: str
 
 
-@app.post("/api/auth/register", status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/api/auth/register",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit)],
+)
 def register_user(item: UserRegister, db: Session = Depends(get_db)):
     existing = db.query(models.User).filter(models.User.email == item.email).first()
     if existing:
@@ -482,7 +491,7 @@ def register_user(item: UserRegister, db: Session = Depends(get_db)):
     }
 
 
-@app.post("/api/auth/login")
+@app.post("/api/auth/login", dependencies=[Depends(rate_limit)])
 def login_user(item: UserLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == item.email).first()
     if (
@@ -737,6 +746,22 @@ def redirect_url(
     if short_id in ["api", "favicon.ico"]:
         raise HTTPException(status_code=404)
 
+    # Sliding-window rate limit per client IP
+    client_ip = get_client_ip(request)
+    redirect_limit = int(os.getenv("REDIRECT_RATE_LIMIT", "10000"))
+    redirect_window = int(os.getenv("REDIRECT_RATE_WINDOW", "60"))
+    rate_key = f"rate_limit:redirect:{client_ip}"
+    allowed, _rem, retry_after = redis_cache.sliding_window_rate_limit(
+        rate_key, redirect_window, redirect_limit
+    )
+    if not allowed:
+        logger.warning(f"Redirect rate limit exceeded for client IP {client_ip}.")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many redirect requests. Please slow down.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     try:
         redis_cache.incr("metrics:redirect:total")
     except Exception as e:
@@ -824,7 +849,7 @@ def redirect_url(
     return RedirectResponse(url=target_url)
 
 
-@app.post("/{short_id}")
+@app.post("/{short_id}", dependencies=[Depends(rate_limit)])
 def verify_password_and_redirect(
     short_id: str,
     request: Request,
