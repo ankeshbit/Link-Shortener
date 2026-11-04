@@ -584,3 +584,180 @@ def test_sliding_window_fail_open_on_redis_error():
         res = client.get("/nonexistent_alias_failopen", follow_redirects=False)
         # 404 because link doesn't exist, NOT 500 or 429
         assert res.status_code == 404
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_url_create_max_clicks_validation():
+    """Asserts that max_clicks accepts >= 1 and rejects < 1."""
+    headers = {"Authorization": f"Bearer {register_token('item3_val_user')}"}
+
+    # 1. Valid max_clicks
+    res_valid = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/mc-valid", "max_clicks": 10},
+        headers=headers,
+    )
+    assert res_valid.status_code == 200
+    assert res_valid.json()["max_clicks"] == 10
+
+    # 2. Invalid max_clicks (< 1)
+    res_invalid = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/mc-invalid", "max_clicks": 0},
+        headers=headers,
+    )
+    assert res_invalid.status_code == 422
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_patch_link_ownership_and_update():
+    """Asserts that only the link owner can PATCH, and updates target_url, password, and active status."""
+    token1 = register_token("owner_user_1")
+    token2 = register_token("other_user_2")
+    headers1 = {"Authorization": f"Bearer {token1}"}
+    headers2 = {"Authorization": f"Bearer {token2}"}
+
+    alias = f"patch_own_{os.urandom(4).hex()}"
+    create_res = client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/initial", "custom_alias": alias},
+        headers=headers1,
+    )
+    assert create_res.status_code == 200
+
+    # User 2 tries to PATCH user 1's link -> 403 Forbidden
+    res_forbidden = client.patch(
+        f"/api/user/links/{alias}",
+        json={"target_url": "https://example.com/hijack"},
+        headers=headers2,
+    )
+    assert res_forbidden.status_code == 403
+
+    # User 1 successfully updates target_url, max_clicks, and sets password
+    res_ok = client.patch(
+        f"/api/user/links/{alias}",
+        json={
+            "target_url": "https://example.com/updated",
+            "max_clicks": 50,
+            "password": "NewSecretPassword123",
+            "is_active": True,
+        },
+        headers=headers1,
+    )
+    assert res_ok.status_code == 200
+    updated_data = res_ok.json()
+    assert updated_data["target_url"] == "https://example.com/updated"
+    assert updated_data["max_clicks"] == 50
+    assert updated_data["has_password"] is True
+
+    # User 1 clears password
+    res_clear_pwd = client.patch(
+        f"/api/user/links/{alias}",
+        json={"clear_password": True},
+        headers=headers1,
+    )
+    assert res_clear_pwd.status_code == 200
+    assert res_clear_pwd.json()["has_password"] is False
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_patch_link_cache_invalidation_and_disable():
+    """Verifies that PATCH invalidates cache and disabling refuses redirects on both cache and DB paths."""
+    token = register_token("cache_inval_user")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"inval_{os.urandom(4).hex()}"
+
+    # 1. Create link
+    client.post(
+        "/api/shorten",
+        json={"target_url": "https://example.com/before-patch", "custom_alias": alias},
+        headers=headers,
+    )
+
+    # 2. Redirect once to warm cache
+    res1 = client.get(f"/{alias}", follow_redirects=False)
+    assert res1.status_code in [301, 302, 303, 307]
+    assert res1.headers["location"] == "https://example.com/before-patch"
+
+    # 3. PATCH target_url
+    patch_res = client.patch(
+        f"/api/user/links/{alias}",
+        json={"target_url": "https://example.com/after-patch"},
+        headers=headers,
+    )
+    assert patch_res.status_code == 200
+
+    # 4. Next redirect must route to after-patch (cache was invalidated)
+    res2 = client.get(f"/{alias}", follow_redirects=False)
+    assert res2.status_code in [301, 302, 303, 307]
+    assert res2.headers["location"] == "https://example.com/after-patch"
+
+    # 5. Disable link
+    client.patch(
+        f"/api/user/links/{alias}",
+        json={"is_active": False},
+        headers=headers,
+    )
+
+    # Cache path: redirect refused
+    res_disabled_cache = client.get(f"/{alias}", follow_redirects=False)
+    assert res_disabled_cache.status_code == 200
+    assert (
+        "Link Expired" in res_disabled_cache.text
+        or "no longer active" in res_disabled_cache.text
+    )
+
+    # DB path (clear cache): redirect also refused
+    if redis_cache.client:
+        redis_cache.client.delete(f"url:{alias}")
+    res_disabled_db = client.get(f"/{alias}", follow_redirects=False)
+    assert res_disabled_db.status_code == 200
+    assert (
+        "Link Expired" in res_disabled_db.text
+        or "no longer active" in res_disabled_db.text
+    )
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_max_clicks_atomic_concurrency_cache_and_db():
+    """Verifies that concurrent requests cannot exceed max_clicks on cache and DB paths."""
+    import concurrent.futures
+
+    token = register_token("concurrent_clicks_user")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"conc_{os.urandom(4).hex()}"
+
+    # Create link with max_clicks = 4
+    client.post(
+        "/api/shorten",
+        json={
+            "target_url": "https://example.com/concurrent-limit",
+            "custom_alias": alias,
+            "max_clicks": 4,
+        },
+        headers=headers,
+    )
+
+    def do_redirect():
+        # Separate client call
+        res = client.get(f"/{alias}", follow_redirects=False)
+        return res.status_code in [301, 302, 303, 307]
+
+    # Hammer with 12 concurrent requests
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(lambda _: do_redirect(), range(12)))
+
+    allowed_count = sum(results)
+    assert allowed_count == 4, f"Expected exactly 4 allowed clicks, got {allowed_count}"
+
+    # 13th request must also be refused
+    res_over = client.get(f"/{alias}", follow_redirects=False)
+    assert "no longer active" in res_over.text

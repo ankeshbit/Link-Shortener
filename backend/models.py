@@ -1,5 +1,6 @@
+import sqlalchemy as sa
 from database import Base
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -30,6 +31,10 @@ class URL(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at = Column(DateTime(timezone=True), nullable=True)
     password = Column(String, nullable=True)  # Hashed using SHA-256
+    max_clicks = Column(Integer, nullable=True)
+    is_active = Column(
+        Boolean, default=True, nullable=False, server_default=sa.text("true")
+    )
 
     # Optional association with User (guest shorteners will have user_id=None)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)

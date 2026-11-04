@@ -38,6 +38,24 @@ else
 end
 """
 
+ATOMIC_CLICK_CHECK_LUA = """
+local key = KEYS[1]
+local max_clicks = tonumber(ARGV[1])
+local initial_count = tonumber(ARGV[2])
+
+local exists = redis.call('EXISTS', key)
+if exists == 0 then
+    redis.call('SET', key, initial_count)
+end
+
+local current = redis.call('INCR', key)
+if current > max_clicks then
+    return 0
+else
+    return 1
+end
+"""
+
 
 class SafeRedisClient:
     """Redis cache client; PostgreSQL remains the source of truth."""
@@ -128,6 +146,32 @@ class SafeRedisClient:
                 self.client = None
                 return False
         return False
+
+    def check_and_incr_clicks(
+        self, short_id: str, max_clicks: int, initial_count: int = 0
+    ) -> bool:
+        """
+        Atomically checks and increments click count for short_id in Redis.
+        Returns True if click is allowed (within max_clicks), False if exceeded.
+        Fails open (returns True) if Redis is down or unavailable.
+        """
+        if self._should_attempt_reconnect():
+            self._init_client()
+
+        if not self.client:
+            return True
+
+        key = f"url:{short_id}:clicks"
+        try:
+            res = self.client.eval(
+                ATOMIC_CLICK_CHECK_LUA, 1, key, str(max_clicks), str(initial_count)
+            )
+            return bool(res == 1)
+        except Exception as e:
+            logger.warning(f"Atomic click check failed ({e}); failing open.")
+            self.client = None
+            self.last_reconnect_attempt = time.time()
+            return True
 
     def sliding_window_rate_limit(
         self, key: str, window_seconds: float, limit: int

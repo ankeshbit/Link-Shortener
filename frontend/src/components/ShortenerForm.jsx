@@ -16,6 +16,7 @@ const ShortenerForm = () => {
   const [customAlias, setCustomAlias] = useState(() => sessionStorage.getItem('shortenerDraftAlias') || '');
   const [expiresAt, setExpiresAt] = useState(() => sessionStorage.getItem('shortenerDraftExpiry') || '');
   const [password, setPassword] = useState('');
+  const [maxClicks, setMaxClicks] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [result, setResult] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -45,6 +46,7 @@ const ShortenerForm = () => {
       if (customAlias) payload.custom_alias = customAlias;
       if (expiresAt) payload.expires_at = new Date(expiresAt).toISOString();
       if (password) payload.password = password;
+      if (maxClicks && parseInt(maxClicks, 10) >= 1) payload.max_clicks = parseInt(maxClicks, 10);
 
       const res = await api.post('/api/shorten', payload);
       setResult(res.data);
@@ -55,6 +57,7 @@ const ShortenerForm = () => {
       setCustomAlias('');
       setExpiresAt('');
       setPassword('');
+      setMaxClicks('');
       setShowAdvanced(false);
     } catch (err) {
       if (err.response?.status === 429) {
@@ -219,6 +222,18 @@ const ShortenerForm = () => {
                       value={password} 
                       onChange={(e) => setPassword(e.target.value)} 
                       autoComplete="new-password"
+                    />
+                  </div>
+                  <div className="advanced-field">
+                    <label htmlFor="max-clicks-opt">Max Clicks (Optional)</label>
+                    <input 
+                      id="max-clicks-opt"
+                      type="number"
+                      min="1"
+                      className="advanced-input" 
+                      placeholder="e.g. 100" 
+                      value={maxClicks} 
+                      onChange={(e) => setMaxClicks(e.target.value)} 
                     />
                   </div>
                 </div>

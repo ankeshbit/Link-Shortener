@@ -32,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from firebase_config import initialize_firebase
 from loguru import logger
-from pydantic import BaseModel, EmailStr, ValidationError, field_validator
+from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator
 from redis_client import redis_cache
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -379,7 +379,7 @@ def compile_stats(url: models.URL, db: Session) -> dict:
     }
 
 
-def track_click(short_id: str, user_agent: str, ip: str):
+def track_click(short_id: str, user_agent: str, ip: str, increment_clicks: bool = True):
     # Background tasks run after the request dependency may have been closed.
     with SessionLocal() as db:
         url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
@@ -387,7 +387,8 @@ def track_click(short_id: str, user_agent: str, ip: str):
             logger.warning(f"Could not log click for missing short_id: {short_id}")
             return
 
-        url.clicks_count += 1
+        if increment_clicks:
+            url.clicks_count += 1
 
         country, city, lat, lon = None, None, None, None
         if ip and ip != "127.0.0.1" and ip != "localhost":
@@ -439,6 +440,7 @@ class URLCreate(BaseModel):
     custom_alias: Optional[str] = None
     expires_at: Optional[datetime] = None
     password: Optional[str] = None
+    max_clicks: Optional[int] = Field(None, ge=1)
 
     @field_validator("target_url")
     @classmethod
@@ -446,6 +448,33 @@ class URLCreate(BaseModel):
         parsed = urlsplit(value)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
             raise ValueError("target_url must be an absolute HTTP(S) URL")
+        return value
+
+
+class URLUpdate(BaseModel):
+    target_url: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    max_clicks: Optional[int] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
+    clear_password: Optional[bool] = False
+    clear_max_clicks: Optional[bool] = False
+    clear_expires_at: Optional[bool] = False
+
+    @field_validator("target_url")
+    @classmethod
+    def validate_target_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            parsed = urlsplit(value)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("target_url must be an absolute HTTP(S) URL")
+        return value
+
+    @field_validator("max_clicks")
+    @classmethod
+    def validate_max_clicks(cls, value: Optional[int]) -> Optional[int]:
+        if value is not None and value < 1:
+            raise ValueError("max_clicks must be at least 1")
         return value
 
 
@@ -587,10 +616,79 @@ def get_user_links(
             "clicks_count": url.clicks_count,
             "created_at": url.created_at,
             "expires_at": url.expires_at,
+            "max_clicks": url.max_clicks,
+            "is_active": url.is_active,
+            "has_password": bool(url.password),
             "short_url": f"{PUBLIC_BASE_URL}/{url.short_id}",
         }
         for url in urls
     ]
+
+
+@app.patch("/api/user/links/{short_id}")
+def update_user_link(
+    short_id: str,
+    item: URLUpdate,
+    current_user_id: int = Depends(security.require_current_user_id),
+    db: Session = Depends(get_db),
+):
+    url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Link not found",
+        )
+    if url.user_id != current_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: You do not own this link",
+        )
+
+    if item.target_url is not None:
+        url.target_url = item.target_url
+
+    if item.expires_at is not None:
+        url.expires_at = item.expires_at
+    elif item.clear_expires_at:
+        url.expires_at = None
+
+    if item.max_clicks is not None:
+        url.max_clicks = item.max_clicks
+    elif item.clear_max_clicks:
+        url.max_clicks = None
+
+    if item.is_active is not None:
+        url.is_active = item.is_active
+
+    if item.clear_password:
+        url.password = None
+    elif item.password is not None:
+        if item.password.strip() == "":
+            url.password = None
+        else:
+            url.password = security.hash_link_password(item.password)
+
+    db.commit()
+    db.refresh(url)
+
+    # Invalidate Redis cache
+    try:
+        redis_cache.delete(f"url:{short_id}", f"url:{short_id}:clicks")
+    except Exception as e:
+        logger.warning(f"Could not invalidate cache for updated link {short_id}: {e}")
+
+    return {
+        "id": url.id,
+        "short_id": url.short_id,
+        "target_url": url.target_url,
+        "clicks_count": url.clicks_count,
+        "created_at": url.created_at,
+        "expires_at": url.expires_at,
+        "max_clicks": url.max_clicks,
+        "is_active": url.is_active,
+        "has_password": bool(url.password),
+        "short_url": f"{PUBLIC_BASE_URL}/{url.short_id}",
+    }
 
 
 @app.delete("/api/user/links/{short_id}")
@@ -659,6 +757,8 @@ def create_short_url(
         expires_at=item.expires_at,
         password=hashed_pwd,
         user_id=current_user_id,
+        max_clicks=item.max_clicks,
+        is_active=True,
     )
     db.add(new_url)
     db.commit()
@@ -671,6 +771,9 @@ def create_short_url(
         "target_url": target_url_str,
         "password": bool(hashed_pwd),
         "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+        "max_clicks": item.max_clicks,
+        "is_active": True,
+        "clicks_count": 0,
     }
     try:
         redis_cache.set(f"url:{short_id}", json.dumps(cache_data))
@@ -681,6 +784,8 @@ def create_short_url(
         "short_id": short_id,
         "target_url": target_url_str,
         "short_url": f"{PUBLIC_BASE_URL}/{short_id}",
+        "max_clicks": item.max_clicks,
+        "is_active": True,
     }
 
 
@@ -776,6 +881,10 @@ def redirect_url(
     password = False
     expires_at = None
     target_url = None
+    max_clicks = None
+    is_active = True
+    cached_clicks = 0
+    increment_clicks = True
 
     if cache_entry:
         try:
@@ -785,10 +894,37 @@ def redirect_url(
             expires_at = data.get("expires_at")
             if expires_at:
                 expires_at = datetime.fromisoformat(expires_at)
+            max_clicks = data.get("max_clicks")
+            is_active = data.get("is_active", True)
+            cached_clicks = data.get("clicks_count", 0)
         except Exception:
             target_url = cache_entry
+            max_clicks = None
+            is_active = True
+            cached_clicks = 0
 
     if target_url:
+        # Check active status on cache path
+        if not is_active:
+            return HTMLResponse(
+                get_html_template(
+                    "Link Expired",
+                    "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                )
+            )
+
+        # Check click limit atomically on cache path
+        if max_clicks is not None:
+            if not redis_cache.check_and_incr_clicks(
+                short_id, max_clicks, initial_count=cached_clicks
+            ):
+                return HTMLResponse(
+                    get_html_template(
+                        "Link Expired",
+                        "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                    )
+                )
+
         try:
             redis_cache.incr("metrics:redirect:cache_hits")
         except Exception as e:
@@ -803,6 +939,38 @@ def redirect_url(
         if not url:
             logger.warning(f"Short URL redirect not found: {short_id}")
             raise HTTPException(status_code=404, detail="URL not found")
+
+        # Check active status on DB path
+        if not url.is_active:
+            return HTMLResponse(
+                get_html_template(
+                    "Link Expired",
+                    "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                )
+            )
+
+        # Check click limit atomically on DB path
+        if url.max_clicks is not None:
+            res = db.execute(
+                text(
+                    "UPDATE urls SET clicks_count = clicks_count + 1 "
+                    "WHERE id = :id AND is_active = true AND clicks_count < max_clicks "
+                    "RETURNING id"
+                ),
+                {"id": url.id},
+            ).fetchone()
+            db.commit()
+            if not res:
+                return HTMLResponse(
+                    get_html_template(
+                        "Link Expired",
+                        "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                    )
+                )
+            increment_clicks = False
+        else:
+            increment_clicks = True
+
         target_url = url.target_url
         password = bool(url.password)
         expires_at = url.expires_at
@@ -812,6 +980,9 @@ def redirect_url(
             "target_url": target_url,
             "password": password,
             "expires_at": expires_at.isoformat() if expires_at else None,
+            "max_clicks": url.max_clicks,
+            "is_active": url.is_active,
+            "clicks_count": url.clicks_count,
         }
         try:
             redis_cache.set(f"url:{short_id}", json.dumps(cache_data))
@@ -844,7 +1015,7 @@ def redirect_url(
 
     user_agent = request.headers.get("user-agent", "Unknown")
     ip = get_client_ip(request)
-    background_tasks.add_task(track_click, short_id, user_agent, ip)
+    background_tasks.add_task(track_click, short_id, user_agent, ip, increment_clicks)
 
     return RedirectResponse(url=target_url)
 
@@ -872,6 +1043,34 @@ def verify_password_and_redirect(
             )
         )
 
+    if not url.is_active:
+        return HTMLResponse(
+            get_html_template(
+                "Link Expired",
+                "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+            )
+        )
+
+    increment_clicks = True
+    if url.max_clicks is not None:
+        res = db.execute(
+            text(
+                "UPDATE urls SET clicks_count = clicks_count + 1 "
+                "WHERE id = :id AND is_active = true AND clicks_count < max_clicks "
+                "RETURNING id"
+            ),
+            {"id": url.id},
+        ).fetchone()
+        db.commit()
+        if not res:
+            return HTMLResponse(
+                get_html_template(
+                    "Link Expired",
+                    "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                )
+            )
+        increment_clicks = False
+
     # Password check
     if url.password and not security.verify_link_password(password, url.password):
         form = f"""
@@ -887,7 +1086,7 @@ def verify_password_and_redirect(
 
     user_agent = request.headers.get("user-agent", "Unknown")
     ip = request.client.host
-    background_tasks.add_task(track_click, short_id, user_agent, ip)
+    background_tasks.add_task(track_click, short_id, user_agent, ip, increment_clicks)
 
     return RedirectResponse(url=url.target_url, status_code=303)
 
