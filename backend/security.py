@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import bcrypt
+import models
 from database import get_db
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
@@ -11,7 +12,6 @@ from fastapi.security import OAuth2PasswordBearer
 from firebase_config import verify_firebase_id_token
 from jose import JWTError, jwt
 from loguru import logger
-import models
 from sqlalchemy.orm import Session
 
 load_dotenv()

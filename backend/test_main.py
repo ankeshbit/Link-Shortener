@@ -1,5 +1,6 @@
 import os
 import sys
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 # Ensure backend path is configured
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from database import Base, engine
+from database import engine
 from main import app
 from redis_client import redis_cache
 
@@ -75,9 +76,12 @@ def test_invalid_short_url_404():
 
 def test_account_features_require_authentication():
     """Account-owned link operations must reject unauthenticated requests."""
-    assert client.post(
-        "/api/shorten", json={"target_url": "https://example.com"}
-    ).status_code == 401
+    assert (
+        client.post(
+            "/api/shorten", json={"target_url": "https://example.com"}
+        ).status_code
+        == 401
+    )
     assert client.get("/api/user/links").status_code == 401
     assert client.get("/api/stats/not-a-link").status_code == 401
 
@@ -180,7 +184,7 @@ def test_short_link_flow():
     )
     assert conflict_resp.status_code == 409
 
-    # 3. Try to access redirect URL, expect 307/303 redirect
+    # 3. Try to access redirect URL, expect 302/303 redirect
     redirect_resp = client.get(f"/{alias}", follow_redirects=False)
     assert redirect_resp.status_code in [302, 303, 307]
     assert (
@@ -239,9 +243,6 @@ def test_cache_unavailable_does_not_fabricate_data():
     assert redis_cache.incr("test_counter") >= 1
 
 
-from unittest.mock import patch
-
-
 @pytest.mark.skipif(
     not database_alive(), reason="PostgreSQL test database not available"
 )
@@ -257,7 +258,9 @@ def test_firebase_token_authentication_and_user_creation():
         "email_verified": True,
     }
 
-    with patch("firebase_config.auth.verify_id_token", return_value=mock_claims):
+    with patch("firebase_config._firebase_initialized", True), patch(
+        "firebase_config.auth.verify_id_token", return_value=mock_claims
+    ):
         token = "mock-firebase-id-token"
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -286,7 +289,7 @@ def test_firebase_token_authentication_and_user_creation():
         # 4. User links contains the link
         links_resp = client.get("/api/user/links", headers=headers)
         assert links_resp.status_code == 200
-        user_short_ids = [l["short_id"] for l in links_resp.json()]
+        user_short_ids = [link["short_id"] for link in links_resp.json()]
         assert alias in user_short_ids
 
         # 5. Delete link
@@ -304,7 +307,10 @@ def test_firebase_user_isolation():
 
     alias = f"link_a_{os.urandom(4).hex()}"
 
-    with patch("firebase_config.auth.verify_id_token", return_value={"uid": uid_a, "email": f"{uid_a}@test.co"}):
+    with patch("firebase_config._firebase_initialized", True), patch(
+        "firebase_config.auth.verify_id_token",
+        return_value={"uid": uid_a, "email": f"{uid_a}@test.co"},
+    ):
         create_resp = client.post(
             "/api/shorten",
             json={"target_url": "https://example.com/a", "custom_alias": alias},
@@ -313,11 +319,18 @@ def test_firebase_user_isolation():
         assert create_resp.status_code == 200
 
     # User B attempts to access User A's stats and delete User A's link
-    with patch("firebase_config.auth.verify_id_token", return_value={"uid": uid_b, "email": f"{uid_b}@test.co"}):
-        stats_resp = client.get(f"/api/stats/{alias}", headers={"Authorization": "Bearer token-b"})
+    with patch("firebase_config._firebase_initialized", True), patch(
+        "firebase_config.auth.verify_id_token",
+        return_value={"uid": uid_b, "email": f"{uid_b}@test.co"},
+    ):
+        stats_resp = client.get(
+            f"/api/stats/{alias}", headers={"Authorization": "Bearer token-b"}
+        )
         assert stats_resp.status_code == 404
 
-        del_resp = client.delete(f"/api/user/links/{alias}", headers={"Authorization": "Bearer token-b"})
+        del_resp = client.delete(
+            f"/api/user/links/{alias}", headers={"Authorization": "Bearer token-b"}
+        )
         assert del_resp.status_code == 404
 
 
@@ -329,17 +342,23 @@ def test_firebase_admin_individual_env_initialization():
     mock_email = "test-sa@test-project-123.iam.gserviceaccount.com"
     mock_raw_key = "-----BEGIN PRIVATE KEY-----\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASC\\n-----END PRIVATE KEY-----\\n"
 
-    with patch.dict(os.environ, {
-        "FIREBASE_PROJECT_ID": mock_project_id,
-        "FIREBASE_CLIENT_EMAIL": mock_email,
-        "FIREBASE_PRIVATE_KEY": mock_raw_key,
-        "FIREBASE_SERVICE_ACCOUNT_JSON": "",
-        "FIREBASE_CREDENTIALS_PATH": "",
-    }, clear=False), \
-    patch("firebase_config._firebase_initialized", False), \
-    patch("firebase_admin._apps", {}), \
-    patch("firebase_admin.credentials.Certificate") as mock_cert, \
-    patch("firebase_admin.initialize_app") as mock_init:
+    with patch.dict(
+        os.environ,
+        {
+            "FIREBASE_PROJECT_ID": mock_project_id,
+            "FIREBASE_CLIENT_EMAIL": mock_email,
+            "FIREBASE_PRIVATE_KEY": mock_raw_key,
+            "FIREBASE_SERVICE_ACCOUNT_JSON": "",
+            "FIREBASE_CREDENTIALS_PATH": "",
+        },
+        clear=False,
+    ), patch("firebase_config._firebase_initialized", False), patch(
+        "firebase_admin._apps", {}
+    ), patch(
+        "firebase_admin.credentials.Certificate"
+    ) as mock_cert, patch(
+        "firebase_admin.initialize_app"
+    ) as mock_init:
         res = firebase_config.initialize_firebase()
         assert res is True
         mock_init.assert_called_once()
@@ -353,12 +372,17 @@ def test_firebase_admin_individual_env_initialization():
 def test_firebase_invalid_or_missing_token_401():
     """Verifies that invalid or missing Firebase tokens safely return 401 without revealing internal details."""
     # 1. Missing token
-    res_no_auth = client.post("/api/shorten", json={"target_url": "https://example.com"})
+    res_no_auth = client.post(
+        "/api/shorten", json={"target_url": "https://example.com"}
+    )
     assert res_no_auth.status_code == 401
     assert res_no_auth.json()["message"] == "Authentication required"
 
     # 2. Invalid token
-    with patch("firebase_config.auth.verify_id_token", side_effect=Exception("Invalid signature")):
+    with patch(
+        "firebase_config.auth.verify_id_token",
+        side_effect=Exception("Invalid signature"),
+    ):
         res_invalid = client.post(
             "/api/shorten",
             json={"target_url": "https://example.com"},
@@ -367,3 +391,69 @@ def test_firebase_invalid_or_missing_token_401():
         assert res_invalid.status_code == 401
         assert res_invalid.json()["message"] == "Authentication required"
 
+
+def test_metrics_endpoint_structure():
+    """Asserts that /api/metrics returns the expected keys and types."""
+    response = client.get("/api/metrics")
+    assert response.status_code == 200
+    data = response.json()
+    assert "total_redirects" in data
+    assert "cache_hits" in data
+    assert "cache_misses" in data
+    assert "cache_hit_rate" in data
+    assert isinstance(data["total_redirects"], int)
+    assert isinstance(data["cache_hits"], int)
+    assert isinstance(data["cache_misses"], int)
+    assert isinstance(data["cache_hit_rate"], (int, float))
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_metrics_counter_increments():
+    """Asserts that redirecting through short URLs increments metrics counters."""
+    headers = {"Authorization": f"Bearer {register_token('metrics_user')}"}
+    alias = f"metric_{os.urandom(4).hex()}"
+    target = "https://example.com/metrics-test"
+
+    # 1. Read baseline metrics
+    before = client.get("/api/metrics").json()
+
+    # 2. Shorten URL (which pre-populates the cache)
+    create_resp = client.post(
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers=headers,
+    )
+    assert create_resp.status_code == 200
+
+    # 3. Hit the redirect (cache hit)
+    redir_resp = client.get(f"/{alias}", follow_redirects=False)
+    assert redir_resp.status_code in [301, 302, 303, 307]
+
+    after_hit = client.get("/api/metrics").json()
+    if redis_cache.client:
+        assert after_hit["total_redirects"] >= before["total_redirects"] + 1
+        assert after_hit["cache_hits"] >= before["cache_hits"] + 1
+
+    # 4. Invalidate cache and hit again (cache miss -> then cached)
+    if redis_cache.client:
+        redis_cache.client.delete(f"url:{alias}")
+
+    redir_miss = client.get(f"/{alias}", follow_redirects=False)
+    assert redir_miss.status_code in [301, 302, 303, 307]
+
+    after_miss = client.get("/api/metrics").json()
+    if redis_cache.client:
+        assert after_miss["cache_misses"] >= after_hit["cache_misses"] + 1
+
+
+def test_metrics_fail_open_on_redis_error():
+    """Asserts that /api/metrics fails open and returns zero values if Redis is unreachable."""
+    with patch("main.redis_cache.get", side_effect=Exception("Redis connection lost")):
+        response = client.get("/api/metrics")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["cache_hits"] == 0
+        assert data["cache_misses"] == 0
+        assert data["cache_hit_rate"] == 0.0

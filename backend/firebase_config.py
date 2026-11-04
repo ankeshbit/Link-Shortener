@@ -43,20 +43,20 @@ def initialize_firebase() -> bool:
             clean_project_id = project_id.strip().strip("'\"")
             clean_client_email = client_email.strip().strip("'\"")
             # Replace literal escaped \n with actual newlines
-            clean_private_key = (
-                private_key.strip().strip("'\"").replace("\\n", "\n")
-            )
+            clean_private_key = private_key.strip().strip("'\"").replace("\\n", "\n")
 
             logger.info(
                 f"Initializing Firebase Admin using individual credentials for project: {clean_project_id}."
             )
-            cred = credentials.Certificate({
-                "type": "service_account",
-                "project_id": clean_project_id,
-                "private_key": clean_private_key,
-                "client_email": clean_client_email,
-                "token_uri": "https://oauth2.googleapis.com/token",
-            })
+            cred = credentials.Certificate(
+                {
+                    "type": "service_account",
+                    "project_id": clean_project_id,
+                    "private_key": clean_private_key,
+                    "client_email": clean_client_email,
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            )
             firebase_admin.initialize_app(cred)
             _firebase_initialized = True
             return True
@@ -64,7 +64,9 @@ def initialize_firebase() -> bool:
         # 2. Check for monolithic service account JSON string
         service_account_json = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
         if service_account_json and service_account_json.strip():
-            logger.info("Initializing Firebase Admin with FIREBASE_SERVICE_ACCOUNT_JSON.")
+            logger.info(
+                "Initializing Firebase Admin with FIREBASE_SERVICE_ACCOUNT_JSON."
+            )
             cred_dict = json.loads(service_account_json.strip())
             if "private_key" in cred_dict and isinstance(cred_dict["private_key"], str):
                 cred_dict["private_key"] = cred_dict["private_key"].replace("\\n", "\n")
@@ -149,14 +151,22 @@ def verify_firebase_id_token(token: str) -> Optional[dict[str, Any]]:
         logger.warning("Firebase ID token verification failed: token has been revoked.")
         return None
     except auth.InvalidIdTokenError:
-        logger.warning("Firebase ID token verification failed: invalid token signature or structure.")
+        logger.warning(
+            "Firebase ID token verification failed: invalid token signature or structure."
+        )
         return None
     except auth.CertificateFetchError:
-        logger.error("Firebase ID token verification failed: unable to fetch public key certificates.")
+        logger.error(
+            "Firebase ID token verification failed: unable to fetch public key certificates."
+        )
         return None
     except ValueError:
-        logger.warning("Firebase ID token verification failed: malformed token or project ID mismatch.")
+        logger.warning(
+            "Firebase ID token verification failed: malformed token or project ID mismatch."
+        )
         return None
     except Exception as e:
-        logger.error(f"Firebase ID token verification failed: unexpected error ({type(e).__name__}).")
+        logger.error(
+            f"Firebase ID token verification failed: unexpected error ({type(e).__name__})."
+        )
         return None

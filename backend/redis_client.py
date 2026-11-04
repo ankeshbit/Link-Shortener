@@ -28,13 +28,16 @@ class SafeRedisClient:
             logger.warning("REDIS_URL is not configured; Redis features are disabled.")
             return
         if redis is None:
-            logger.warning("Redis package is not installed; Redis features are disabled.")
+            logger.warning(
+                "Redis package is not installed; Redis features are disabled."
+            )
             return
 
         try:
             self.client = redis.from_url(
                 self.redis_url,
                 decode_responses=True,
+                protocol=2,
                 socket_connect_timeout=0.5,
                 socket_timeout=0.5,
                 retry_on_timeout=False,
@@ -65,9 +68,7 @@ class SafeRedisClient:
                 method = getattr(self.client, method_name)
                 return method(*args, **kwargs)
             except Exception as e:
-                logger.error(
-                    f"Redis operation '{method_name}' failed: {e}."
-                )
+                logger.error(f"Redis operation '{method_name}' failed: {e}.")
                 self.client = (
                     None  # Set client to None to trigger reconnect logic next time
                 )

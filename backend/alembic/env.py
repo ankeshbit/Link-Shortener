@@ -9,7 +9,8 @@ from sqlalchemy import engine_from_config, pool
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv()
 
-from database import Base, normalize_database_url
+import models  # noqa: E402, F401
+from database import Base, normalize_database_url  # noqa: E402
 
 config = context.config
 
@@ -31,7 +32,9 @@ def get_db_url() -> str:
     try:
         return normalize_database_url(database_url)
     except RuntimeError as exc:
-        raise ValueError("DATABASE_URL must be a PostgreSQL connection string.") from exc
+        raise ValueError(
+            "DATABASE_URL must be a PostgreSQL connection string."
+        ) from exc
 
 
 def run_migrations_offline() -> None:

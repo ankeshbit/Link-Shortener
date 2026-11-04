@@ -32,7 +32,7 @@ class URL(Base):
     password = Column(String, nullable=True)  # Hashed using SHA-256
 
     # Optional association with User (guest shorteners will have user_id=None)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
 
     user = relationship("User", back_populates="urls")
     clicks = relationship(
@@ -44,7 +44,7 @@ class ClickEvent(Base):
     __tablename__ = "click_events"
 
     id = Column(Integer, primary_key=True, index=True)
-    url_id = Column(Integer, ForeignKey("urls.id"))
+    url_id = Column(Integer, ForeignKey("urls.id", ondelete="CASCADE"))
     ip_address = Column(String(50))
     country = Column(String(50))
     city = Column(String(50))

@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 import httpx
 import models
 import security
-from firebase_config import initialize_firebase
 
 # Local imports
 from database import SessionLocal, engine, get_db
@@ -31,6 +30,7 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from firebase_config import initialize_firebase
 from loguru import logger
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator
 from redis_client import redis_cache
@@ -67,9 +67,7 @@ async def lifespan(app: FastAPI):
         if redis_cache.ping():
             logger.info("Redis connectivity verified successfully.")
         else:
-            logger.warning(
-                "Redis ping returned False. Running in degraded mode."
-            )
+            logger.warning("Redis ping returned False. Running in degraded mode.")
     except Exception as e:
         logger.warning(
             f"Redis connection verification failed: {e}. Running in degraded mode."
@@ -423,7 +421,9 @@ def track_click(short_id: str, user_agent: str, ip: str):
         stats_data = compile_stats(url, db)
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                manager.broadcast(short_id, {"type": "click_update", "data": stats_data}),
+                manager.broadcast(
+                    short_id, {"type": "click_update", "data": stats_data}
+                ),
                 loop,
             )
 
@@ -543,7 +543,9 @@ def get_user_me(
         "id": current_user.id,
         "email": current_user.email,
         "firebase_uid": current_user.firebase_uid,
-        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "created_at": (
+            current_user.created_at.isoformat() if current_user.created_at else None
+        ),
     }
 
 
@@ -555,7 +557,9 @@ def sync_user(
         "id": current_user.id,
         "email": current_user.email,
         "firebase_uid": current_user.firebase_uid,
-        "created_at": current_user.created_at.isoformat() if current_user.created_at else None,
+        "created_at": (
+            current_user.created_at.isoformat() if current_user.created_at else None
+        ),
     }
 
 
@@ -695,6 +699,33 @@ def get_html_template(title, body_content):
     """
 
 
+# Metrics endpoint
+@app.get("/api/metrics")
+def get_metrics():
+    hits = 0
+    misses = 0
+    total = 0
+    try:
+        raw_hits = redis_cache.get("metrics:redirect:cache_hits")
+        raw_misses = redis_cache.get("metrics:redirect:cache_misses")
+        raw_total = redis_cache.get("metrics:redirect:total")
+        hits = int(raw_hits) if raw_hits is not None else 0
+        misses = int(raw_misses) if raw_misses is not None else 0
+        total = int(raw_total) if raw_total is not None else 0
+    except Exception as e:
+        logger.warning(f"Failed to read redirect metrics from Redis: {e}")
+
+    effective_total = max(total, hits + misses)
+    hit_rate = (hits / effective_total) if effective_total > 0 else 0.0
+
+    return {
+        "total_redirects": effective_total,
+        "cache_hits": hits,
+        "cache_misses": misses,
+        "cache_hit_rate": round(hit_rate, 4),
+    }
+
+
 # Redirection endpoints
 @app.get("/{short_id}")
 def redirect_url(
@@ -705,6 +736,11 @@ def redirect_url(
 ):
     if short_id in ["api", "favicon.ico"]:
         raise HTTPException(status_code=404)
+
+    try:
+        redis_cache.incr("metrics:redirect:total")
+    except Exception as e:
+        logger.warning(f"Could not increment total redirects metric: {e}")
 
     cache_entry = None
     try:
@@ -727,7 +763,17 @@ def redirect_url(
         except Exception:
             target_url = cache_entry
 
-    if not cache_entry or not target_url:
+    if target_url:
+        try:
+            redis_cache.incr("metrics:redirect:cache_hits")
+        except Exception as e:
+            logger.warning(f"Could not increment cache hits metric: {e}")
+    else:
+        try:
+            redis_cache.incr("metrics:redirect:cache_misses")
+        except Exception as e:
+            logger.warning(f"Could not increment cache misses metric: {e}")
+
         url = db.query(models.URL).filter(models.URL.short_id == short_id).first()
         if not url:
             logger.warning(f"Short URL redirect not found: {short_id}")
@@ -855,9 +901,7 @@ async def websocket_stats(websocket: WebSocket, short_id: str):
 
     await manager.connect(short_id, websocket)
     try:
-        await websocket.send_json(
-            {"type": "initial_stats", "data": initial_stats}
-        )
+        await websocket.send_json({"type": "initial_stats", "data": initial_stats})
         # Loop to keep socket active
         while True:
             await websocket.receive_text()
