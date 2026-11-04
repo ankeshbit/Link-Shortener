@@ -1135,3 +1135,125 @@ def test_report_abuse_auto_disable_threshold():
     assert (
         "Link Expired" in res_disabled.text or "no longer active" in res_disabled.text
     )
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_redirect_status_code_and_head_request():
+    """Verifies configurable redirect status code (default 302, 301 override) and matching HEAD handling."""
+    token = register_token("redirect_status_user")
+    headers = {"Authorization": f"Bearer {token}"}
+    alias = f"redir_{os.urandom(4).hex()}"
+    target = "https://example.com/dest-landing"
+
+    create_res = client.post(
+        "/api/shorten",
+        json={"target_url": target, "custom_alias": alias},
+        headers=headers,
+    )
+    assert create_res.status_code == 200
+
+    # 1. Default status code is 302 for both GET and HEAD
+    get_res = client.get(f"/{alias}", follow_redirects=False)
+    assert get_res.status_code == 302
+    assert get_res.headers["location"] == target
+
+    head_res = client.head(f"/{alias}", follow_redirects=False)
+    assert head_res.status_code == 302
+    assert head_res.headers["location"] == target
+    assert len(head_res.text) == 0
+
+    # 2. Configurable via REDIRECT_STATUS_CODE=301
+    with patch.dict(os.environ, {"REDIRECT_STATUS_CODE": "301"}):
+        get_301 = client.get(f"/{alias}", follow_redirects=False)
+        assert get_301.status_code == 301
+        assert get_301.headers["location"] == target
+
+        head_301 = client.head(f"/{alias}", follow_redirects=False)
+        assert head_301.status_code == 301
+        assert head_301.headers["location"] == target
+        assert len(head_301.text) == 0
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_short_code_collision_retry():
+    """Verifies that short_id generation retries on IntegrityError when collisions occur under concurrency."""
+    token = register_token("collision_user")
+    headers = {"Authorization": f"Bearer {token}"}
+    existing_alias = f"col_{os.urandom(4).hex()}"
+    target1 = "https://example.com/existing"
+    target2 = "https://example.com/retried-target"
+
+    # Pre-create a link with existing_alias
+    create_res1 = client.post(
+        "/api/shorten",
+        json={"target_url": target1, "custom_alias": existing_alias},
+        headers=headers,
+    )
+    assert create_res1.status_code == 200
+
+    # Simulate collision: generate_short_id first yields existing_alias (causes IntegrityError on commit),
+    # then on retry yields a fresh unique short code.
+    unique_alias = f"uniq_{os.urandom(4).hex()}"
+    with patch(
+        "main.generate_short_id",
+        side_effect=[existing_alias, unique_alias],
+    ):
+        create_res2 = client.post(
+            "/api/shorten",
+            json={"target_url": target2},
+            headers=headers,
+        )
+        assert create_res2.status_code == 200
+        assert create_res2.json()["short_id"] == unique_alias
+
+    # Verify both links exist in DB
+    from database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        url1 = (
+            db.query(models.URL).filter(models.URL.short_id == existing_alias).first()
+        )
+        url2 = db.query(models.URL).filter(models.URL.short_id == unique_alias).first()
+        assert url1 is not None and url1.target_url == target1
+        assert url2 is not None and url2.target_url == target2
+    finally:
+        db.close()
+
+
+@pytest.mark.skipif(
+    not database_alive(), reason="PostgreSQL test database not available"
+)
+def test_short_code_collision_retry_exhausted():
+    """Verifies that 500 is cleanly returned if all collision retries are exhausted."""
+    token = register_token("collision_exhaust_user")
+    headers = {"Authorization": f"Bearer {token}"}
+    existing_alias = f"col_ex_{os.urandom(4).hex()}"
+
+    # Pre-create a link
+    client.post(
+        "/api/shorten",
+        json={
+            "target_url": "https://example.com/first",
+            "custom_alias": existing_alias,
+        },
+        headers=headers,
+    )
+
+    # Always yield existing_alias across all retries
+    with patch(
+        "main.generate_short_id",
+        side_effect=[existing_alias] * 10,
+    ):
+        res = client.post(
+            "/api/shorten",
+            json={"target_url": "https://example.com/will-fail"},
+            headers=headers,
+        )
+        assert res.status_code == 500
+        msg = res.json().get("message", res.json().get("detail", ""))
+        assert "Could not generate unique short URL" in msg

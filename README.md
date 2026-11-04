@@ -166,6 +166,46 @@ analytics data by the authenticated user's `user_id`.
 
 ---
 
+## Short Code Generation & Keyspace Analysis
+
+ByteLink generates 7-character alphanumeric short codes using a Base62 alphabet (`[a-zA-Z0-9]`).
+
+### Keyspace Math
+- **Alphabet Size**: 62 characters (26 lowercase + 26 uppercase + 10 digits)
+- **Code Length**: $L = 7$
+- **Total Unique Keyspace**:
+  $$N = 62^7 = 3,521,614,606,208 \approx 3.52 \times 10^{12} \text{ (over 3.52 trillion unique combinations)}$$
+
+### Collision Probability & Birthday Paradox
+When generating random keys uniformly, collision probability can be evaluated from two perspectives:
+1. **Per-Insertion Collision Probability**: The probability that a freshly generated short code matches an existing key in a database of $n$ links:
+   $$P(\text{collision on next insert}) = \frac{n}{N}$$
+   - **At 1,000,000 (1M) links**: $\frac{10^6}{3.52 \times 10^{12}} \approx 0.0000284\%$ (~1 in 3,520,000 insertions).
+   - **At 100,000,000 (100M) links**: $\frac{10^8}{3.52 \times 10^{12}} \approx 0.00284\%$ (~1 in 35,216 insertions).
+
+2. **Dataset-Wide Birthday Paradox**: The probability of at least one collision occurring across the entire dataset of $n$ randomly generated keys:
+   $$P(\ge 1 \text{ collision}) \approx 1 - e^{-\frac{n(n-1)}{2N}} \approx 1 - e^{-\frac{n^2}{2N}}$$
+   - **At 1,000,000 (1M) links**: $\frac{n^2}{2N} = \frac{10^{12}}{7.043 \times 10^{12}} \approx 0.14197 \implies P \approx 13.24\%$.
+   - **At 100,000,000 (100M) links**: $\frac{n^2}{2N} \approx 1420 \implies P \approx 100\%$.
+
+### Concurrency-Safe Retry vs. Check-Then-Insert
+Rather than using a vulnerable "check-then-insert" pattern (`SELECT` before `INSERT`), which causes race conditions under concurrent creation and adds redundant database round-trip latency to 99.997%+ of requests, ByteLink relies on PostgreSQL's atomic `UNIQUE` constraint index on `short_id`. The application optimistically attempts insertion; in the rare event of an `IntegrityError`, the transaction is cleanly rolled back and retried up to 5 times with a new pseudo-random draw.
+
+---
+
+## Redirect Status Codes & HTTP Semantics (301 vs 302)
+
+ByteLink supports configurable HTTP redirect status codes via the `REDIRECT_STATUS_CODE` environment variable (default: `302`). Both `GET` and `HEAD` requests to `/{short_id}` are handled symmetrically.
+
+| Status Code | Caching Behavior | Analytics Impact | Use Case |
+|---|---|---|---|
+| **`302 Found` (Default)** | Temporary redirect; browsers and proxies do **not** cache the destination. | **Full Accuracy**: Every click reaches ByteLink, enabling real-time analytics, geo-logging, sliding-window rate limiting, and instant enforcement of `max_clicks` and link expiration. | Recommended for URL shorteners requiring precise click metrics and administrative link controls. |
+| **`301 Moved Permanently`** | Permanent redirect; browsers aggressively cache the destination locally on disk. | **Blinded Analytics**: Subsequent visits bypass ByteLink servers entirely; clicks are neither counted nor logged, and link edits or deactivations are ignored by cached browsers. | Recommended when prioritizing server bandwidth and latency offloading over click tracking. |
+
+`HEAD` requests return the exact same HTTP redirect status code and `Location` header without transmitting a response body or incrementing user click limits.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |

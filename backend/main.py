@@ -382,6 +382,13 @@ def rate_limit(request: Request):
     return True
 
 
+def get_redirect_status_code() -> int:
+    try:
+        return int(os.getenv("REDIRECT_STATUS_CODE", "302"))
+    except (ValueError, TypeError):
+        return 302
+
+
 def generate_short_id(length: int = 7) -> str:
     alphabet = string.ascii_letters + string.digits
     return "".join(secrets.choice(alphabet) for _ in range(length))
@@ -843,39 +850,63 @@ def create_short_url(
 ):
     target_url_str = str(item.target_url)
 
+    # Secure password if provided
+    hashed_pwd = security.hash_link_password(item.password) if item.password else None
+
     if item.custom_alias:
-        existing = (
-            db.query(models.URL)
-            .filter(models.URL.short_id == item.custom_alias)
-            .first()
+        short_id = item.custom_alias
+        new_url = models.URL(
+            short_id=short_id,
+            target_url=target_url_str,
+            expires_at=item.expires_at,
+            password=hashed_pwd,
+            user_id=current_user_id,
+            max_clicks=item.max_clicks,
+            is_active=True,
         )
-        if existing:
+        db.add(new_url)
+        try:
+            db.commit()
+            db.refresh(new_url)
+        except IntegrityError:
+            db.rollback()
             logger.warning(f"Conflict: Alias '{item.custom_alias}' already in use.")
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Alias already in use. Please select another alias.",
             )
-        short_id = item.custom_alias
     else:
-        short_id = generate_short_id()
-        while db.query(models.URL).filter(models.URL.short_id == short_id).first():
+        max_retries = 5
+        new_url = None
+        for attempt in range(max_retries):
             short_id = generate_short_id()
-
-    # Secure password if provided
-    hashed_pwd = security.hash_link_password(item.password) if item.password else None
-
-    new_url = models.URL(
-        short_id=short_id,
-        target_url=target_url_str,
-        expires_at=item.expires_at,
-        password=hashed_pwd,
-        user_id=current_user_id,
-        max_clicks=item.max_clicks,
-        is_active=True,
-    )
-    db.add(new_url)
-    db.commit()
-    db.refresh(new_url)
+            new_url = models.URL(
+                short_id=short_id,
+                target_url=target_url_str,
+                expires_at=item.expires_at,
+                password=hashed_pwd,
+                user_id=current_user_id,
+                max_clicks=item.max_clicks,
+                is_active=True,
+            )
+            db.add(new_url)
+            try:
+                db.commit()
+                db.refresh(new_url)
+                break
+            except IntegrityError:
+                db.rollback()
+                logger.warning(
+                    f"Short ID collision on '{short_id}' (attempt {attempt + 1}/{max_retries}). Retrying..."
+                )
+                if attempt == max_retries - 1:
+                    logger.error(
+                        "Failed to generate a unique short_id after max retries."
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Could not generate unique short URL. Please try again.",
+                    )
     logger.info(
         f"Short link created: {short_id} -> {target_url_str} (User: {current_user_id})"
     )
@@ -1015,6 +1046,7 @@ def report_abuse(
 
 # Redirection endpoints
 @app.get("/{short_id}")
+@app.head("/{short_id}")
 def redirect_url(
     short_id: str,
     request: Request,
@@ -1088,15 +1120,25 @@ def redirect_url(
 
         # Check click limit atomically on cache path
         if max_clicks is not None:
-            if not redis_cache.check_and_incr_clicks(
-                short_id, max_clicks, initial_count=cached_clicks
-            ):
-                return HTMLResponse(
-                    get_html_template(
-                        "Link Expired",
-                        "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+            if request.method == "HEAD":
+                current_clicks = redis_cache.get(f"clicks:{short_id}")
+                if current_clicks is not None and int(current_clicks) >= max_clicks:
+                    return HTMLResponse(
+                        get_html_template(
+                            "Link Expired",
+                            "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                        )
                     )
-                )
+            else:
+                if not redis_cache.check_and_incr_clicks(
+                    short_id, max_clicks, initial_count=cached_clicks
+                ):
+                    return HTMLResponse(
+                        get_html_template(
+                            "Link Expired",
+                            "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                        )
+                    )
 
         try:
             redis_cache.incr("metrics:redirect:cache_hits")
@@ -1124,23 +1166,33 @@ def redirect_url(
 
         # Check click limit atomically on DB path
         if url.max_clicks is not None:
-            res = db.execute(
-                text(
-                    "UPDATE urls SET clicks_count = clicks_count + 1 "
-                    "WHERE id = :id AND is_active = true AND clicks_count < max_clicks "
-                    "RETURNING id"
-                ),
-                {"id": url.id},
-            ).fetchone()
-            db.commit()
-            if not res:
-                return HTMLResponse(
-                    get_html_template(
-                        "Link Expired",
-                        "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+            if request.method == "HEAD":
+                if url.clicks_count >= url.max_clicks:
+                    return HTMLResponse(
+                        get_html_template(
+                            "Link Expired",
+                            "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                        )
                     )
-                )
-            increment_clicks = False
+                increment_clicks = False
+            else:
+                res = db.execute(
+                    text(
+                        "UPDATE urls SET clicks_count = clicks_count + 1 "
+                        "WHERE id = :id AND is_active = true AND clicks_count < max_clicks "
+                        "RETURNING id"
+                    ),
+                    {"id": url.id},
+                ).fetchone()
+                db.commit()
+                if not res:
+                    return HTMLResponse(
+                        get_html_template(
+                            "Link Expired",
+                            "<h2>Link Expired</h2><p>This short URL is no longer active.</p>",
+                        )
+                    )
+                increment_clicks = False
         else:
             increment_clicks = True
 
@@ -1186,35 +1238,36 @@ def redirect_url(
         """
         return HTMLResponse(get_html_template("Password Required", form))
 
-    user_agent = request.headers.get("user-agent", "Unknown")
-    ip = get_client_ip(request)
+    if request.method != "HEAD":
+        user_agent = request.headers.get("user-agent", "Unknown")
+        ip = get_client_ip(request)
 
-    stream_pushed = False
-    try:
-        if redis_cache.client:
-            redis_cache.client.xadd(
-                "stream:clicks",
-                {
-                    "event_id": uuid.uuid4().hex,
-                    "short_id": short_id,
-                    "ip": ip,
-                    "user_agent": user_agent,
-                    "increment_clicks": "1" if increment_clicks else "0",
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
+        stream_pushed = False
+        try:
+            if redis_cache.client:
+                redis_cache.client.xadd(
+                    "stream:clicks",
+                    {
+                        "event_id": uuid.uuid4().hex,
+                        "short_id": short_id,
+                        "ip": ip,
+                        "user_agent": user_agent,
+                        "increment_clicks": "1" if increment_clicks else "0",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                stream_pushed = True
+        except Exception as e:
+            logger.warning(
+                f"Could not push to Redis Stream ({e}); falling back to in-process."
             )
-            stream_pushed = True
-    except Exception as e:
-        logger.warning(
-            f"Could not push to Redis Stream ({e}); falling back to in-process."
-        )
 
-    if not stream_pushed:
-        background_tasks.add_task(
-            track_click, short_id, user_agent, ip, increment_clicks
-        )
+        if not stream_pushed:
+            background_tasks.add_task(
+                track_click, short_id, user_agent, ip, increment_clicks
+            )
 
-    return RedirectResponse(url=target_url)
+    return RedirectResponse(url=target_url, status_code=get_redirect_status_code())
 
 
 @app.post("/{short_id}", dependencies=[Depends(rate_limit)])
